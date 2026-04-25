@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, ProgressBar, RichLog
+from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import LX06App
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
@@ -18,7 +18,6 @@ from lx06_tool.modules.backup import (
     verify_backup,
     generate_backup_report,
 )
-
 logger = logging.getLogger(__name__)
 
 BACKUP_INFO = """## Phase 2: Backup & Safety
@@ -44,6 +43,20 @@ class BackupScreen(Screen):
     #backup-actions { height: auto; align: center middle; padding: 1 0; }
     #backup-actions Button { margin: 0 1; }
     #skip-warning { color: $warning; text-align: center; padding: 1 2; background: $warning-darken-3; }
+    #sudo-row {
+        height: 3;
+        padding: 0 1;
+        align: center middle;
+    }
+    #sudo-row Static {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    #sudo-input {
+        width: 30;
+        margin: 1 0;
+        border: solid $warning;
+    }
     """
 
     backup_started: reactive[bool] = reactive(False)
@@ -52,6 +65,13 @@ class BackupScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Markdown(BACKUP_INFO)
+        with Horizontal(id="sudo-row"):
+            yield Static("\U0001f512 Sudo Password:")
+            yield Input(
+                placeholder="\U0001f510 Sudo password...",
+                password=True,
+                id="sudo-input",
+            )
         yield ProgressBar(total=100, id="backup-progress")
         yield RichLog(id="backup-log", highlight=True, markup=True)
         with Vertical(id="backup-actions"):
@@ -68,6 +88,18 @@ class BackupScreen(Screen):
 
     def on_unmount(self) -> None:
         unregister_sink(self._debug_sink)
+
+    def _get_sudo_password(self) -> str:
+        """Get the sudo password from the input field and sync to app."""
+        try:
+            pw = self.query_one("#sudo-input", Input).value.strip()
+        except Exception:
+            pw = ""
+        # Sync to app-level so other screens can use it
+        app = self.app
+        if isinstance(app, LX06App):
+            app.sudo_password = pw
+        return pw
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":
@@ -132,6 +164,8 @@ class BackupScreen(Screen):
         # Disable skip button once backup starts
         self.query_one("#skip-btn", Button).disabled = True
 
+        pw = self._get_sudo_password()
+
         try:
             tool = app.get_aml_tool()
             backup_dir = app.config.backup_dir
@@ -140,7 +174,7 @@ class BackupScreen(Screen):
             # Step 0: Query partition info for debugging
             log.write("[dim]Querying device partition info...[/]")
             try:
-                part_info = await tool.list_partitions()
+                part_info = await tool.list_partitions(sudo_password=pw)
                 log.write(f"[dim]{part_info}[/]")
             except Exception as exc:
                 log.write(f"[dim]Partition info query failed (non-fatal): {exc}[/]")
@@ -151,8 +185,8 @@ class BackupScreen(Screen):
 
             try:
                 # Set bootdelay for recovery access
-                await tool.setenv("bootdelay", "15")
-                await tool.saveenv()
+                await tool.setenv("bootdelay", "15", sudo_password=pw)
+                await tool.saveenv(sudo_password=pw)
 
                 # Verify by reading back
                 from lx06_tool.utils.runner import run
@@ -160,6 +194,7 @@ class BackupScreen(Screen):
                     [str(tool._exe), "bulkcmd", "printenv bootdelay"],
                     timeout=10,
                 )
+
 
                 bootdelay = 0
                 if result.ok:
@@ -188,7 +223,6 @@ class BackupScreen(Screen):
             log.write("\n[bold blue]Step 2: Dumping MTD partitions...[/]")
 
             skipped: list[str] = []
-
             def on_partition_start(mtd_name: str, label: str) -> None:
                 log.write(f"\n  Dumping {mtd_name} ({label})...")
 
@@ -197,14 +231,16 @@ class BackupScreen(Screen):
 
             def on_partition_skip(mtd_name: str, reason: str) -> None:
                 skipped.append(mtd_name)
-                log.write(f"  [yellow]⚠ Skipped {mtd_name}: {reason}[/]")
+                log.write(f"  [yellow]\u26a0 Skipped {mtd_name}: {reason}[/]")
 
+            # Pass sudo_password for partition dump operations
             backup_set = await dump_all_partitions(
                 tool=tool,
                 backup_dir=backup_dir,
                 on_partition_start=on_partition_start,
                 on_line=on_line,
                 on_partition_skip=on_partition_skip,
+                sudo_password=pw,
             )
 
             # Update progress for each partition dumped

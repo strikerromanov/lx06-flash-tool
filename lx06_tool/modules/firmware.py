@@ -353,6 +353,7 @@ async def extract_partition_from_device(
     output_path: Path,
     *,
     on_progress: "Callable[[str], None] | None" = None,
+    sudo_password: str = "",
 ) -> Path:
     """Extract a partition directly from a connected device.
 
@@ -365,6 +366,7 @@ async def extract_partition_from_device(
         partition_label: Partition label (e.g. "system0", "boot0").
         output_path: Where to save the dumped partition.
         on_progress: Optional callback for progress output lines.
+        sudo_password: Optional sudo password for USB permission operations.
 
     Returns:
         Path to the extracted partition image.
@@ -389,6 +391,7 @@ async def extract_partition_from_device(
             output_path=output_path,
             timeout=180,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )
     except UpdateExeError as exc:
         raise FirmwareError(
@@ -414,6 +417,7 @@ async def extract_active_system_from_device(
     output_dir: Path,
     *,
     on_progress: "Callable[[str], None] | None" = None,
+    sudo_password: str = "",
 ) -> tuple[Path, str]:
     """Extract the active system partition from a connected device.
 
@@ -424,6 +428,7 @@ async def extract_active_system_from_device(
         tool: Connected AmlogicTool instance.
         output_dir: Directory to save extracted images.
         on_progress: Optional callback for progress output lines.
+        sudo_password: Optional sudo password for USB permission operations.
 
     Returns:
         Tuple of (system_image_path, active_slot_label).
@@ -436,7 +441,7 @@ async def extract_active_system_from_device(
     # Try to determine active slot via boot environment
     active_slot = "system0"  # default assumption
     try:
-        result = await tool.bulk_cmd("printenv boot_part", timeout=10)
+        result = await tool.bulk_cmd("printenv boot_part", timeout=10, sudo_password=sudo_password)
         output = result.stdout + result.stderr
         if "system1" in output or "boot1" in output:
             active_slot = "system1"
@@ -462,6 +467,7 @@ async def extract_active_system_from_device(
         on_progress(f"Extracting {sys_label} partition from device...")
     await extract_partition_from_device(
         tool, sys_label, system_path, on_progress=on_progress,
+        sudo_password=sudo_password,
     )
 
     return system_path, active_slot

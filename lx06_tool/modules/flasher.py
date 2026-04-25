@@ -36,6 +36,8 @@ from lx06_tool.utils.amlogic import AmlogicTool
 async def detect_active_partition(
     tool: AmlogicTool,
     device: LX06Device,
+    *,
+    sudo_password: str = "",
 ) -> None:
     """
     Determine which A/B slots are currently active and populate `device`.
@@ -49,7 +51,7 @@ async def detect_active_partition(
     for stock firmware — the user can override on the confirmation screen).
     """
     # Try to read U-boot env via AmlogicTool (uses correct 5-space prefix)
-    result = await tool.bulkcmd("printenv boot_part", timeout=10)
+    result = await tool.bulkcmd("printenv boot_part", timeout=10, sudo_password=sudo_password)
 
     active_boot = "boot0"  # safe default
 
@@ -73,7 +75,6 @@ async def detect_active_partition(
     device.inactive_boot    = inactive_boot
     device.active_system    = active_system
     device.inactive_system  = inactive_system
-
 
 # ─── Safety Guard ─────────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ async def flash_partition(
     *,
     on_progress: Optional[Callable[[str], None]] = None,
     min_size: int = 0,
+    sudo_password: str = "",
 ) -> None:
     """
     Flash `image_path` to `partition_label` after safety checks.
@@ -133,6 +135,7 @@ async def flash_partition(
             partition_name=partition_label,
             image_path=image_path,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )
     except Exception as exc:
         raise FlashError(
@@ -149,6 +152,7 @@ async def flash_all(
     *,
     on_step: Optional[Callable[[str], None]] = None,
     on_line: Optional[Callable[[str], None]] = None,
+    sudo_password: str = "",
 ) -> None:
     """
     Flash boot (optional) and system images to inactive A/B slots.
@@ -157,7 +161,8 @@ async def flash_all(
         if on_step:
             on_step(f"Flashing boot → {device.inactive_boot}")
         await flash_partition(
-            tool, device.inactive_boot, boot_image, device, on_progress=on_line
+            tool, device.inactive_boot, boot_image, device,
+            on_progress=on_line, sudo_password=sudo_password,
         )
 
     if on_step:
@@ -169,6 +174,7 @@ async def flash_all(
         device,
         on_progress=on_line,
         min_size=MIN_SQUASHFS_SIZE_BYTES,
+        sudo_password=sudo_password,
     )
 
 

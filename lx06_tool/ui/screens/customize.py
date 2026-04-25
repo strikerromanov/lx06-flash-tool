@@ -38,10 +38,31 @@ class CustomizeScreen(Screen):
     .section-title { text-style: bold; color: $accent; margin: 0 0 1 0; }
     .option-row { height: auto; margin: 0 0 0 1; }
     #customize-actions { height: auto; align: center middle; padding: 1 0; }
+    #sudo-row {
+        height: 3;
+        padding: 0 1;
+        align: center middle;
+    }
+    #sudo-row Static {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    #sudo-input {
+        width: 30;
+        margin: 1 0;
+        border: solid $warning;
+    }
     """
 
     def compose(self) -> ComposeResult:
         yield Markdown(CUSTOMIZE_INFO)
+        with Horizontal(id="sudo-row"):
+            yield Static("\U0001f512 Sudo Password:")
+            yield Input(
+                placeholder="\U0001f510 Sudo password...",
+                password=True,
+                id="sudo-input",
+            )
         with VerticalScroll(id="customize-scroll"):
 
             # ── Debloat Section ──
@@ -101,8 +122,23 @@ class CustomizeScreen(Screen):
         except Exception:
             return ""
 
+    def _get_sudo_password(self) -> str:
+        """Get the sudo password from the input field and sync to app."""
+        try:
+            pw = self.query_one("#sudo-input", Input).value.strip()
+        except Exception:
+            pw = ""
+        # Sync to app-level so other screens can use it
+        app = self.app
+        if isinstance(app, LX06App):
+            app.sudo_password = pw
+        return pw
+
     async def _confirm(self) -> None:
         """Collect all selections and pass to the app."""
+
+        # Sync sudo password to app
+        self._get_sudo_password()
 
         # Determine AI mode from checkboxes
         ai_soft = self._get_checkbox("ai-soft")

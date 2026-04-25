@@ -6,9 +6,9 @@ import logging
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, ProgressBar, RichLog
+from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import LX06App
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
@@ -39,10 +39,31 @@ class BuildScreen(Screen):
     #build-log { height: 1fr; border: solid $primary; margin: 1 0; }
     #build-progress { height: 1; margin: 0 0 1 0; }
     #build-actions { height: auto; align: center middle; padding: 1 0; }
+    #sudo-row {
+        height: 3;
+        padding: 0 1;
+        align: center middle;
+    }
+    #sudo-row Static {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    #sudo-input {
+        width: 30;
+        margin: 1 0;
+        border: solid $warning;
+    }
     """
 
     def compose(self) -> ComposeResult:
         yield Markdown(BUILD_INFO)
+        with Horizontal(id="sudo-row"):
+            yield Static("\U0001f512 Sudo Password:")
+            yield Input(
+                placeholder="\U0001f510 Sudo password...",
+                password=True,
+                id="sudo-input",
+            )
         yield ProgressBar(total=100, id="build-progress")
         yield RichLog(id="build-log", highlight=True, markup=True)
         with Vertical(id="build-actions"):
@@ -57,6 +78,18 @@ class BuildScreen(Screen):
 
     def on_unmount(self) -> None:
         unregister_sink(self._debug_sink)
+
+    def _get_sudo_password(self) -> str:
+        """Get the sudo password from the input field and sync to app."""
+        try:
+            pw = self.query_one("#sudo-input", Input).value.strip()
+        except Exception:
+            pw = ""
+        # Sync to app-level so other screens can use it
+        app = self.app
+        if isinstance(app, LX06App):
+            app.sudo_password = pw
+        return pw
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":
@@ -87,6 +120,7 @@ class BuildScreen(Screen):
         app: LX06App,
         log: RichLog,
         build_dir: Path,
+        sudo_password: str = "",
     ) -> tuple[Path | None, Path | None]:
         """Extract system and boot partitions directly from connected device.
 
@@ -115,8 +149,9 @@ class BuildScreen(Screen):
             tool,
             extract_dir,
             on_progress=on_extract_progress,
+            sudo_password=sudo_password,
         )
-        log.write(f"  [green]✓[/] Extracted system partition ({active_slot}): {system_image.name}")
+        log.write(f"  [green]\u2713[/] Extracted system partition ({active_slot}): {system_image.name}")
         log.write(f"    Size: {system_image.stat().st_size:,} bytes")
 
         # Extract corresponding boot partition
@@ -129,10 +164,11 @@ class BuildScreen(Screen):
             log.write(f"  Extracting {boot_label} partition from device...")
             boot_image = await extract_partition_from_device(
                 tool, boot_label, boot_path, on_progress=on_extract_progress,
+                sudo_password=sudo_password,
             )
-            log.write(f"  [green]✓[/] Extracted boot partition: {boot_image.name}")
+            log.write(f"  [green]\u2713[/] Extracted boot partition: {boot_image.name}")
         except Exception as exc:
-            log.write(f"  [yellow]⚠ Boot extraction skipped: {exc}[/]")
+            log.write(f"  [yellow]\u26a0 Boot extraction skipped: {exc}[/]")
             log.write("  [dim]Boot partition is optional for most customizations.[/]")
             boot_image = None
 
@@ -148,6 +184,8 @@ class BuildScreen(Screen):
             return
 
         self.query_one("#start-btn", Button).disabled = True
+
+        pw = self._get_sudo_password()
 
         def on_step(step_name: str, pct: int) -> None:
             log.write(f"[bold blue]{step_name}[/]")
@@ -175,7 +213,7 @@ class BuildScreen(Screen):
 
             if system_image:
                 source_label = f"backup ({system_image.name})"
-                log.write(f"  [green]✓[/] Found system backup: {system_image.name}")
+                log.write(f"  [green]\u2713[/] Found system backup: {system_image.name}")
 
                 # Also look for boot backup
                 boot_image = self._find_backup_image(
@@ -184,7 +222,7 @@ class BuildScreen(Screen):
                     suffixes=["_boot0", "_boot1", ""],
                 )
                 if boot_image:
-                    log.write(f"  [green]✓[/] Found boot backup: {boot_image.name}")
+                    log.write(f"  [green]\u2713[/] Found boot backup: {boot_image.name}")
             else:
                 # 1b. No backup — try extracting directly from device
                 log.write("  No backup images found in backup directory.")
@@ -194,13 +232,13 @@ class BuildScreen(Screen):
                     on_step("Extracting firmware directly from device...", 5)
 
                     system_image, boot_image = await self._extract_from_device(
-                        app, log, build_dir,
+                        app, log, build_dir, sudo_password=pw,
                     )
                     source_label = f"device (direct extraction)"
                 else:
                     # 1c. No backup AND no device — cannot proceed
                     log.write("")
-                    log.write("[bold red]✗ No firmware source available![/]")
+                    log.write("[bold red]\u2717 No firmware source available![/]")
                     log.write("")
                     log.write("[yellow]Options:[/]")
                     log.write("  1. Go back and run backup first (recommended)")
@@ -241,7 +279,7 @@ class BuildScreen(Screen):
             if result.warnings:
                 log.write(f"\n[yellow]Warnings ({len(result.warnings)}):[/]")
                 for w in result.warnings:
-                    log.write(f"  [yellow]•[/] {w}")
+                    log.write(f"  [yellow]\u2022[/] {w}")
 
             self.query_one("#continue-btn", Button).disabled = False
             app.update_status("Build complete")

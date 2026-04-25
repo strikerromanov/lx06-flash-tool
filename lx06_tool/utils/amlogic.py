@@ -185,7 +185,13 @@ class AmlogicTool:
 
     # ─── Bulk Command (U-Boot) ─────────────────────────────────────────
 
-    async def bulkcmd(self, cmd: str, timeout: int = 10) -> RunResult:
+    async def bulkcmd(
+        self,
+        cmd: str,
+        timeout: int = 10,
+        *,
+        sudo_password: str = "",
+    ) -> RunResult:
         """Send a U-Boot command via `update bulkcmd`.
 
         The official aml-flash-tool.sh prepends 5 spaces to the bulkcmd
@@ -203,40 +209,61 @@ class AmlogicTool:
         spaced_cmd = self.BULKCMD_SPACE_PREFIX + cmd
         log.debug("bulkcmd: %s", cmd)
 
-        result = await run([self._exe, "bulkcmd", spaced_cmd], timeout=timeout)
+        full_cmd = [self._exe, "bulkcmd", spaced_cmd]
+        result = await run(full_cmd, timeout=timeout)
 
         # Official tool checks for "ERR" in output (even if RC=0)
         combined = (result.stdout + "\n" + result.stderr).strip()
         if "ERR" in combined.upper():
             log.warning("bulkcmd '%s' reported error: %s", cmd, combined[:200])
 
+        # Retry with sudo if initial attempt failed and password is available
+        if not result.ok and sudo_password:
+            try:
+                from lx06_tool.utils.sudo import sudo_run
+                sudo_result = await sudo_run(
+                    [str(self._exe), "bulkcmd", spaced_cmd],
+                    password=sudo_password,
+                    timeout=timeout,
+                )
+                if sudo_result.ok:
+                    log.debug("bulkcmd succeeded via sudo fallback")
+                    return RunResult(
+                        cmd=[str(self._exe), "bulkcmd", spaced_cmd],
+                        returncode=0,
+                        stdout=sudo_result.output,
+                        stderr="",
+                    )
+            except Exception as exc:
+                log.debug("sudo bulkcmd retry failed: %s", exc)
+
         return result
 
     # Backward-compatible alias
-    async def bulk_cmd(self, cmd: str, timeout: int = 10) -> RunResult:
+    async def bulk_cmd(self, cmd: str, timeout: int = 10, *, sudo_password: str = "") -> RunResult:
         """Deprecated alias for bulkcmd()."""
-        return await self.bulkcmd(cmd, timeout=timeout)
+        return await self.bulkcmd(cmd, timeout=timeout, sudo_password=sudo_password)
 
-    async def setenv(self, key: str, value: str) -> None:
+    async def setenv(self, key: str, value: str, *, sudo_password: str = "") -> None:
         """Set a U-boot environment variable."""
-        result = await self.bulkcmd(f"setenv {key} {value}")
+        result = await self.bulkcmd(f"setenv {key} {value}", sudo_password=sudo_password)
         if result.returncode != 0:
             raise UpdateExeError(
                 f"setenv {key}={value} failed: {result.stderr}",
                 returncode=result.returncode,
             )
 
-    async def saveenv(self) -> None:
+    async def saveenv(self, *, sudo_password: str = "") -> None:
         """Persist U-boot environment to storage.
 
         Uses ``saveenv`` (standard U-Boot command).  The official
         aml-flash-tool.sh uses ``save`` which is an alias on most
         Amlogic builds.
         """
-        result = await self.bulkcmd("saveenv")
+        result = await self.bulkcmd("saveenv", sudo_password=sudo_password)
         if result.returncode != 0:
             # Try 'save' as fallback (some Amlogic builds use this)
-            result2 = await self.bulkcmd("save")
+            result2 = await self.bulkcmd("save", sudo_password=sudo_password)
             if result2.returncode != 0:
                 raise UpdateExeError(
                     f"saveenv failed: {result.stderr}",
@@ -253,6 +280,7 @@ class AmlogicTool:
         *,
         timeout: int = 180,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        sudo_password: str = "",
     ) -> RunResult:
         """
         Dump device memory to a host file.
@@ -274,19 +302,53 @@ class AmlogicTool:
         addr_str = f"0x{addr:08X}"
         log.debug("mread mem %s normal %d %s", addr_str, size, output_path)
 
-        result = await run_streaming(
-            [self._exe, "mread", "mem", addr_str, "normal", str(size), str(output_path)],
-            timeout=timeout,
-            on_stdout=on_progress,
-            on_stderr=on_progress,
-        )
+        cmd = [self._exe, "mread", "mem", addr_str, "normal", str(size), str(output_path)]
 
-        if result.returncode != 0:
-            raise UpdateExeError(
-                f"mread mem {addr_str} normal {size} failed: {result.stderr}",
-                returncode=result.returncode,
+        try:
+            result = await run_streaming(
+                cmd,
+                timeout=timeout,
+                on_stdout=on_progress,
+                on_stderr=on_progress,
             )
-        return result
+
+            if result.returncode != 0:
+                raise UpdateExeError(
+                    f"mread mem {addr_str} normal {size} failed: {result.stderr}",
+                    returncode=result.returncode,
+                )
+            return result
+        except Exception as exc:
+            if not sudo_password:
+                raise
+
+            # Retry with sudo as fallback for USB permission issues
+            log.debug("Retrying mread mem with sudo...")
+            try:
+                from lx06_tool.utils.sudo import sudo_run
+                sudo_result = await sudo_run(
+                    [str(c) for c in cmd],
+                    password=sudo_password,
+                    timeout=timeout,
+                )
+                if sudo_result.ok:
+                    log.debug("mread mem succeeded via sudo fallback")
+                    return RunResult(
+                        cmd=[str(c) for c in cmd],
+                        returncode=0,
+                        stdout=sudo_result.output,
+                        stderr="",
+                    )
+                else:
+                    raise UpdateExeError(
+                        f"mread mem {addr_str} normal {size} failed (sudo): {sudo_result.output}",
+                        returncode=sudo_result.returncode,
+                    )
+            except UpdateExeError:
+                raise
+            except Exception as sudo_exc:
+                log.debug("sudo mread mem retry failed: %s", sudo_exc)
+                raise exc  # Raise original exception
 
     # ─── Partition Dump (High-Level) ───────────────────────────────────
 
@@ -298,6 +360,7 @@ class AmlogicTool:
         *,
         timeout: int = 180,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        sudo_password: str = "",
     ) -> RunResult:
         """
         Dump a NAND partition to a host file using the two-step process.
@@ -349,7 +412,7 @@ class AmlogicTool:
         for i, cmd in enumerate(read_cmds):
             try:
                 log.debug("Trying read command [%d]: %s", i, cmd)
-                result = await self.bulkcmd(cmd, timeout=30)
+                result = await self.bulkcmd(cmd, timeout=30, sudo_password=sudo_password)
                 combined = (result.stdout + "\n" + result.stderr).strip()
 
                 if result.returncode == 0 and "ERR" not in combined.upper():
@@ -383,6 +446,7 @@ class AmlogicTool:
             output_path=output_path,
             timeout=timeout,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )
 
         log.info(
@@ -399,6 +463,7 @@ class AmlogicTool:
         size: int = 0,
         timeout: int = 180,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        sudo_password: str = "",
     ) -> RunResult:
         """
         Dump a partition to a host file.
@@ -440,11 +505,17 @@ class AmlogicTool:
             output_path=output_path,
             timeout=timeout,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )
 
     # ─── Partition Listing ─────────────────────────────────────────────
 
-    async def list_partitions(self, timeout: int = 10) -> str:
+    async def list_partitions(
+        self,
+        timeout: int = 10,
+        *,
+        sudo_password: str = "",
+    ) -> str:
         """
         Query the device for partition information.
 
@@ -463,7 +534,7 @@ class AmlogicTool:
 
         # Try printenv partitions
         try:
-            result = await self.bulkcmd("printenv partitions", timeout=timeout)
+            result = await self.bulkcmd("printenv partitions", timeout=timeout, sudo_password=sudo_password)
             if result.returncode == 0:
                 outputs.append(f"[printenv partitions]\n{result.stdout}")
         except Exception as exc:
@@ -471,7 +542,7 @@ class AmlogicTool:
 
         # Try full printenv for partition-related variables
         try:
-            result = await self.bulkcmd("printenv", timeout=timeout)
+            result = await self.bulkcmd("printenv", timeout=timeout, sudo_password=sudo_password)
             if result.returncode == 0:
                 combined = result.stdout + "\n" + result.stderr
                 # Extract partition-related lines
@@ -486,7 +557,7 @@ class AmlogicTool:
 
         # Try store list
         try:
-            result = await self.bulkcmd("store list", timeout=timeout)
+            result = await self.bulkcmd("store list", timeout=timeout, sudo_password=sudo_password)
             if result.returncode == 0:
                 outputs.append(f"[store list]\n{result.stdout}")
         except Exception as exc:
@@ -504,6 +575,7 @@ class AmlogicTool:
         partition_type: str = "normal",
         timeout: int = 300,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        sudo_password: str = "",
     ) -> RunResult:
         """
         Flash an image to a named partition.
@@ -517,18 +589,52 @@ class AmlogicTool:
         log = logging.getLogger(__name__)
         log.info("Flashing partition '%s' from %s (type=%s)", partition_name, image_path, partition_type)
 
-        result = await run_streaming(
-            [self._exe, "partition", partition_name, str(image_path), partition_type],
-            timeout=timeout,
-            on_stdout=on_progress,
-            on_stderr=on_progress,
-        )
-        if result.returncode != 0:
-            raise UpdateExeError(
-                f"flash of '{partition_name}' from '{image_path}' failed: {result.stderr}",
-                returncode=result.returncode,
+        cmd = [self._exe, "partition", partition_name, str(image_path), partition_type]
+
+        try:
+            result = await run_streaming(
+                cmd,
+                timeout=timeout,
+                on_stdout=on_progress,
+                on_stderr=on_progress,
             )
-        return result
+            if result.returncode != 0:
+                raise UpdateExeError(
+                    f"flash of '{partition_name}' from '{image_path}' failed: {result.stderr}",
+                    returncode=result.returncode,
+                )
+            return result
+        except Exception as exc:
+            if not sudo_password:
+                raise
+
+            # Retry with sudo as fallback for USB permission issues
+            log.debug("Retrying partition flash with sudo...")
+            try:
+                from lx06_tool.utils.sudo import sudo_run
+                sudo_result = await sudo_run(
+                    [str(c) for c in cmd],
+                    password=sudo_password,
+                    timeout=timeout,
+                )
+                if sudo_result.ok:
+                    log.debug("Partition flash succeeded via sudo fallback")
+                    return RunResult(
+                        cmd=[str(c) for c in cmd],
+                        returncode=0,
+                        stdout=sudo_result.output,
+                        stderr="",
+                    )
+                else:
+                    raise UpdateExeError(
+                        f"flash of '{partition_name}' from '{image_path}' failed (sudo): {sudo_result.output}",
+                        returncode=sudo_result.returncode,
+                    )
+            except UpdateExeError:
+                raise
+            except Exception as sudo_exc:
+                log.debug("sudo partition flash retry failed: %s", sudo_exc)
+                raise exc  # Raise original exception
 
     # ─── Legacy / Compatibility ────────────────────────────────────────
 
@@ -539,6 +645,7 @@ class AmlogicTool:
         *,
         timeout: int = 300,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        sudo_password: str = "",
     ) -> RunResult:
         """
         Flash an image to a partition (convenience wrapper).
@@ -553,4 +660,5 @@ class AmlogicTool:
             partition_type="normal",
             timeout=timeout,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )

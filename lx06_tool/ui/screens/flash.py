@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, ProgressBar, RichLog, Static
+from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import LX06App, FlashResult
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
@@ -46,10 +46,31 @@ class FlashScreen(Screen):
     #flash-progress { height: 1; margin: 0 0 1 0; }
     #flash-status { height: auto; padding: 1; background: $primary-darken-2; color: $text; text-align: center; }
     #flash-actions { height: auto; align: center middle; padding: 1 0; }
+    #sudo-row {
+        height: 3;
+        padding: 0 1;
+        align: center middle;
+    }
+    #sudo-row Static {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    #sudo-input {
+        width: 30;
+        margin: 1 0;
+        border: solid $warning;
+    }
     """
 
     def compose(self) -> ComposeResult:
         yield Markdown(FLASH_INFO)
+        with Horizontal(id="sudo-row"):
+            yield Static("\U0001f512 Sudo Password:")
+            yield Input(
+                placeholder="\U0001f510 Sudo password...",
+                password=True,
+                id="sudo-input",
+            )
         yield Static("Ready to flash.", id="flash-status")
         yield ProgressBar(total=100, id="flash-progress")
         yield RichLog(id="flash-log", highlight=True, markup=True)
@@ -70,6 +91,18 @@ class FlashScreen(Screen):
     def on_unmount(self) -> None:
         unregister_sink(self._debug_sink)
 
+    def _get_sudo_password(self) -> str:
+        """Get the sudo password from the input field and sync to app."""
+        try:
+            pw = self.query_one("#sudo-input", Input).value.strip()
+        except Exception:
+            pw = ""
+        # Sync to app-level so other screens can use it
+        app = self.app
+        if isinstance(app, LX06App):
+            app.sudo_password = pw
+        return pw
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":
             self.app.run_worker(self._run_flash())
@@ -89,6 +122,8 @@ class FlashScreen(Screen):
         self.query_one("#start-btn", Button).disabled = True
         self.query_one("#cancel-btn", Button).disabled = False
 
+        pw = self._get_sudo_password()
+
         start_time = time.monotonic()
         result = FlashResult()
 
@@ -103,7 +138,7 @@ class FlashScreen(Screen):
 
             # Step 1: Detect A/B partitions
             log.write("[bold blue]Step 1: Detecting A/B partitions...[/]")
-            await detect_active_partition(tool, device)
+            await detect_active_partition(tool, device, sudo_password=pw)
 
             log.write(f"  Active boot:    {device.active_boot}")
             log.write(f"  Inactive boot:  {device.inactive_boot}")
@@ -162,6 +197,7 @@ class FlashScreen(Screen):
                 system_image=system_image,
                 on_step=on_step,
                 on_line=on_progress,
+                sudo_password=pw,
             )
 
             # Flash succeeded

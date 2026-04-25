@@ -32,6 +32,7 @@ async def dump_partition(
     output_path: Path,
     *,
     on_progress: Optional[Callable[[str], None]] = None,
+    sudo_password: str = "",
 ) -> PartitionBackup:
     """
     Dump a single MTD partition to `output_path`.
@@ -53,6 +54,7 @@ async def dump_partition(
             size=expected_size,
             timeout=180,
             on_progress=on_progress,
+            sudo_password=sudo_password,
         )
     except Exception as exc:
         raise PartitionDumpError(mtd_name, str(exc)) from exc
@@ -85,6 +87,7 @@ async def dump_all_partitions(
     on_partition_done:  Optional[Callable[[PartitionBackup], None]] = None,
     on_line:            Optional[Callable[[str], None]] = None,
     on_partition_skip:  Optional[Callable[[str, str], None]] = None,
+    sudo_password: str = "",
 ) -> BackupSet:
     """
     Dump all MTD partitions (mtd0 through mtd6) to `backup_dir`.
@@ -113,7 +116,8 @@ async def dump_all_partitions(
 
         try:
             part = await dump_partition(
-                tool, mtd_name, output, on_progress=on_line
+                tool, mtd_name, output, on_progress=on_line,
+                sudo_password=sudo_password,
             )
             backup_set.partitions[mtd_name] = part
 
@@ -128,7 +132,6 @@ async def dump_all_partitions(
             )
             if on_partition_skip:
                 on_partition_skip(mtd_name, reason)
-
     return backup_set
 
 
