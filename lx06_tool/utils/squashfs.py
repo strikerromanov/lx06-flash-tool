@@ -212,11 +212,10 @@ class SquashFSTool:
         return self._parse_info_output(result.stdout)
 
     async def validate(self, image_path: Path) -> bool:
-        """Check if a file is a valid squashfs image.
-
-        Returns:
-            True if the image can be read by unsquashfs.
-        """
+        """Check if a file is a valid squashfs image."""
+        # Quick magic-byte check first
+        if not self.check_magic_bytes(image_path):
+            return False
         result = await self._runner.run(
             ["unsquashfs", "-s", str(image_path)],
             timeout=10,
@@ -242,3 +241,19 @@ class SquashFSTool:
                 except ValueError:
                     pass
         return info
+
+    @staticmethod
+    def check_magic_bytes(path: Path) -> bool:
+        """Quick check if a file starts with squashfs magic bytes.
+
+        SquashFS magic: bytes 0-3 = b'hsqs' (0x68737173) for little-endian,
+        or b'sqsh' (0x73717368) for big-endian.
+
+        Returns True if the file appears to be a valid squashfs.
+        """
+        try:
+            with open(path, 'rb') as f:
+                magic = f.read(4)
+            return magic in (b'hsqs', b'sqsh')
+        except (OSError, IOError):
+            return False

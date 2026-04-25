@@ -338,10 +338,10 @@ class FirmwareOrchestrator:
             Tuple of (system_mtd, boot_mtd, slot_label).
             e.g. ("mtd5", "mtd3", "system0") if active is system0.
         """
-        if active_slot in ("system0", "mtd5"):
-            return "mtd5", "mtd3", "system0"
+        if active_slot in ("system0", "mtd4"):
+            return "mtd4", "mtd2", "system0"
         else:
-            return "mtd6", "mtd4", "system1"
+            return "mtd5", "mtd3", "system1"
 
 
 # ── Standalone Device Extraction Helpers ─────────────────────────────────────
@@ -409,6 +409,26 @@ async def extract_partition_from_device(
     logger.info(
         "Extracted partition '%s': %d bytes", partition_label, size,
     )
+
+    # Validate the dump is actually a squashfs image
+    from lx06_tool.utils.squashfs import SquashFSTool
+    if not SquashFSTool.check_magic_bytes(output_path):
+        # Read first 16 bytes for diagnostics
+        with open(output_path, 'rb') as f:
+            header = f.read(16)
+        header_hex = header.hex()
+        logger.error(
+            "Partition dump is NOT a valid squashfs! First 16 bytes: %s",
+            header_hex,
+        )
+        raise FirmwareError(
+            f"Dumped image is not a valid squashfs (magic bytes: {header_hex[:8]}). "
+            f"The partition dump may have failed — wrong partition label, wrong size, "
+            f"or corrupted NAND. Try re-dumping with correct partition size.",
+            details=f"File: {output_path} ({size} bytes). Expected squashfs magic 'hsqs'.",
+        )
+    logger.info("Partition dump validated as squashfs: %s", output_path)
+
     return output_path
 
 

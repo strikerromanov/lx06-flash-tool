@@ -224,6 +224,10 @@ BOOTLOADER_BOOTDELAY: Final[int] = 15
 MIN_SQUASHFS_SIZE_BYTES: Final[int] = 1 * 1024 * 1024   #  1 MB  — probably empty if smaller
 MIN_PARTITION_DUMP_RATIO: Final[float] = 0.5              # Dump must be ≥ 50 % of expected size
 
+# SquashFS magic bytes for format validation
+SQUASHFS_MAGIC_LE: Final[bytes] = b'hsqs'   # Little-endian squashfs
+SQUASHFS_MAGIC_BE: Final[bytes] = b'sqsh'   # Big-endian squashfs
+
 # ─── SquashFS Build Settings ──────────────────────────────────────────────────
 
 SQUASHFS_BLOCK_SIZE: Final[int] = 131072          # 128 KB blocks

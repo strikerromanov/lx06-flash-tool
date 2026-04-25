@@ -386,13 +386,23 @@ class AmlogicTool:
         log = logging.getLogger(__name__)
         addr = self.NAND_WORK_ADDR
         addr_str = f"0x{addr:08X}"
+
+        # Auto-query actual partition size from device
+        queried_size = await self.get_partition_size(
+            partition_label, fallback_size=size, sudo_password=sudo_password,
+        )
+        if queried_size != size:
+            log.warning(
+                "Queried partition size (%d) differs from provided size (%d) for '%s'",
+                queried_size, size, partition_label,
+            )
+        size = queried_size
         size_hex = f"0x{size:X}"
 
         log.info(
             "Dumping partition '%s' (%d bytes) via two-step process",
             partition_label, size,
         )
-
         # Step 1: Read NAND partition into device RAM
         # Try multiple U-Boot command variants for compatibility
         read_cmds = [
@@ -564,6 +574,143 @@ class AmlogicTool:
             log.debug("store list failed: %s", exc)
 
         return "\n\n".join(outputs) if outputs else "(no partition info available)"
+
+    async def query_partition_table(
+        self,
+        timeout: int = 15,
+        *,
+        sudo_password: str = "",
+    ) -> dict[str, dict[str, int | str]]:
+        """
+        Query the device for actual partition names and sizes.
+
+        Tries multiple U-Boot commands to discover the partition layout:
+        - ``store list_part`` — lists partitions with sizes
+        - ``store list`` — store information
+        - ``printenv partitions`` — partition environment variable
+
+        Returns:
+            Dict mapping partition label -> {"size": int, "offset": int, "type": str}
+            Sizes/offsets may be 0 if parsing failed.
+        """
+        log = logging.getLogger(__name__)
+        partitions: dict[str, dict[str, int | str]] = {}
+
+        # Try store list_part first — best source for partition sizes
+        try:
+            result = await self.bulkcmd(
+                "store list_part", timeout=timeout, sudo_password=sudo_password,
+            )
+            if result.returncode == 0:
+                log.debug("store list_part output:\n%s", result.stdout)
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    # Parse lines like: system0: size=0x2000000, offset=0x0, type=data
+                    # or: system0 0x2000000 0x0
+                    import re
+                    m = re.match(
+                        r'(\w+)\s*[:\s]\s*size\s*=\s*(0x[0-9a-fA-F]+)',
+                        line,
+                    )
+                    if m:
+                        label = m.group(1)
+                        partitions[label] = {
+                            "size": int(m.group(2), 16),
+                            "offset": 0,
+                            "type": "data",
+                        }
+                        continue
+                    # Try alternate format: label size_hex offset_hex
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isalnum():
+                        try:
+                            sz = int(parts[1], 16) if parts[1].startswith("0x") else int(parts[1])
+                            off = int(parts[2], 16) if len(parts) > 2 and parts[2].startswith("0x") else 0
+                            partitions[parts[0]] = {
+                                "size": sz,
+                                "offset": off,
+                                "type": "data",
+                            }
+                        except (ValueError, IndexError):
+                            pass
+                if partitions:
+                    log.debug("Parsed %d partitions from store list_part", len(partitions))
+                    return partitions
+        except Exception as exc:
+            log.debug("store list_part failed: %s", exc)
+
+        # Fallback: store list
+        try:
+            result = await self.bulkcmd(
+                "store list", timeout=timeout, sudo_password=sudo_password,
+            )
+            if result.returncode == 0:
+                log.debug("store list output:\n%s", result.stdout)
+                import re
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    m = re.match(r'(\w+)\s*[:\s]\s*(0x[0-9a-fA-F]+)', line)
+                    if m:
+                        label = m.group(1)
+                        try:
+                            partitions[label] = {
+                                "size": int(m.group(2), 16),
+                                "offset": 0,
+                                "type": "data",
+                            }
+                        except ValueError:
+                            pass
+                if partitions:
+                    log.debug("Parsed %d partitions from store list", len(partitions))
+                    return partitions
+        except Exception as exc:
+            log.debug("store list failed: %s", exc)
+
+        # Third fallback: printenv partitions
+        try:
+            result = await self.bulkcmd(
+                "printenv partitions", timeout=timeout, sudo_password=sudo_password,
+            )
+            if result.returncode == 0:
+                log.debug("printenv partitions output:\n%s", result.stdout)
+                # Parse partition env variable — usually comma or space separated labels
+                import re
+                labels = re.split(r'[,\s]+', result.stdout.strip())
+                for label in labels:
+                    label = label.strip()
+                    if label and label.isalnum():
+                        partitions[label] = {
+                            "size": 0,
+                            "offset": 0,
+                            "type": "data",
+                        }
+                if partitions:
+                    log.debug("Parsed %d partition labels from printenv", len(partitions))
+        except Exception as exc:
+            log.debug("printenv partitions failed: %s", exc)
+
+        return partitions
+
+    async def get_partition_size(
+        self,
+        partition_label: str,
+        fallback_size: int = 0,
+        *,
+        sudo_password: str = "",
+    ) -> int:
+        """Query actual partition size from device, with fallback."""
+        try:
+            table = await self.query_partition_table(sudo_password=sudo_password)
+            if partition_label in table:
+                size = int(table[partition_label].get("size", 0))
+                if size > 0:
+                    return size
+        except Exception as exc:
+            logging.getLogger(__name__).debug(
+                "query_partition_table failed for '%s': %s", partition_label, exc,
+            )
+        return fallback_size
+
 
     # ─── Partition Flash ───────────────────────────────────────────────
 
