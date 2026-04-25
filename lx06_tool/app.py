@@ -1,0 +1,461 @@
+"""LX06 Flash Tool — Main Textual Application.
+
+Orchestrates the complete workflow through a series of screens:
+  Welcome -> Environment -> USB Connect -> Backup -> Customize -> Build -> Flash -> Complete
+
+Each screen drives one or more backend modules and reports progress
+through shared callbacks. The app holds all module instances and
+passes them to screens as needed.
+
+Usage:
+    lx06                    # Launch the TUI
+    lx06 --check            # Run environment check only
+    lx06 --backup-only      # Only dump partitions (no flash)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+from typing import Any
+
+from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
+from textual.reactive import reactive
+from textual.widgets import (
+    Footer,
+    Header,
+    Label,
+    ProgressBar,
+    Static,
+)
+
+from lx06_tool.config import (
+    AppConfig,
+    CustomizationChoices,
+    LX06Device,
+    load_config,
+    save_config,
+)
+from lx06_tool.state import StateMachine
+from lx06_tool.modules.backup import BackupManager
+from lx06_tool.modules.bootloader import BootloaderManager
+from lx06_tool.modules.debloat import DebloatEngine
+from lx06_tool.modules.docker_builder import DockerBuilder
+from lx06_tool.modules.environment import EnvironmentManager
+from lx06_tool.modules.flasher import Flasher, FlashResult
+from lx06_tool.modules.firmware import FirmwareOrchestrator
+from lx06_tool.modules.media_suite import MediaSuiteInstaller
+from lx06_tool.modules.usb_scanner import USBScanner
+from lx06_tool.utils.amlogic import AmlogicTool
+from lx06_tool.utils.runner import AsyncRunner
+
+logger = logging.getLogger(__name__)
+
+
+APP_CSS = """
+Screen {
+    background: $surface;
+    padding: 1 2;
+}
+
+#main-container {
+    width: 100%;
+    height: 100%;
+}
+
+#phase-title {
+    text-style: bold;
+    color: $accent;
+    text-align: center;
+    padding: 1;
+}
+
+#phase-subtitle {
+    color: $text-muted;
+    text-align: center;
+    padding: 0 0 1 0;
+}
+
+#content {
+    height: 1fr;
+    overflow-y: auto;
+    padding: 1 2;
+}
+
+#status-bar {
+    dock: bottom;
+    height: 3;
+    background: $primary-darken-1;
+    padding: 0 2;
+}
+
+#status-text {
+    color: $text;
+    padding: 0 1;
+}
+
+#global-progress {
+    height: 1;
+}
+"""
+
+
+class LX06App(App):
+    """Xiaomi LX06 Smart Speaker Flash Tool.
+
+    A Textual TUI that guides users through:
+    1. Environment setup (dependencies, Docker, USB rules)
+    2. USB connection & device handshake
+    3. Bootloader unlock & partition backup
+    4. Firmware customization (debloat, media, AI)
+    5. Flashing the custom firmware to the device
+    """
+
+    TITLE = "LX06 Flash Tool"
+    SUB_TITLE = "Xiaomi Xiaoai Speaker Pro — Custom Firmware Installer"
+
+    CSS = APP_CSS
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit", show=True),
+        Binding("d", "toggle_dark", "Dark mode", show=False),
+        Binding("ctrl+r", "refresh", "Refresh", show=False),
+    ]
+
+    # ── Reactive State ───────────────────────────────────────────────────────
+
+    current_phase: reactive[str] = reactive("welcome")
+    status_message: reactive[str] = reactive("Ready")
+    log_output: reactive[str] = reactive("")
+
+    # ── Constructor ───────────────────────────────────────────────────────────
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._config = load_config()
+        self._state_machine = StateMachine()
+        self._runner = AsyncRunner(default_timeout=120.0, sudo=True)
+
+        # Module instances (initialized lazily)
+        self._env_manager: EnvironmentManager | None = None
+        self._usb_scanner: USBScanner | None = None
+        self._aml_tool: AmlogicTool | None = None
+        self._bootloader_mgr: BootloaderManager | None = None
+        self._backup_mgr: BackupManager | None = None
+        self._firmware_pipeline: FirmwareOrchestrator | None = None
+        self._flasher: Flasher | None = None
+
+        # Runtime state
+        self._device: LX06Device | None = None
+        self._choices = CustomizationChoices()
+        self._flash_result: FlashResult | None = None
+
+        self._screens_loaded = False
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def compose(self) -> ComposeResult:
+        """Create the app layout."""
+        yield Header(show_clock=True)
+        yield Container(
+            Vertical(
+                Static(self.TITLE, id="phase-title"),
+                Static("", id="phase-subtitle"),
+                Vertical(id="content"),
+                Vertical(
+                    Static(self.status_message, id="status-text"),
+                    ProgressBar(total=100, id="global-progress"),
+                    id="status-bar",
+                ),
+            ),
+            id="main-container",
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Initialize on first mount."""
+        self._load_screens()
+        self._push_welcome_screen()
+
+    # ── Screen Management ─────────────────────────────────────────────────────
+
+    def _load_screens(self) -> None:
+        """Register all screens with the app."""
+        if self._screens_loaded:
+            return
+
+        from lx06_tool.ui.screens.welcome import WelcomeScreen
+        from lx06_tool.ui.screens.environment import EnvironmentScreen
+        from lx06_tool.ui.screens.usb_connect import USBConnectScreen
+        from lx06_tool.ui.screens.backup import BackupScreen
+        from lx06_tool.ui.screens.customize import CustomizeScreen
+        from lx06_tool.ui.screens.build import BuildScreen
+        from lx06_tool.ui.screens.flash import FlashScreen
+        from lx06_tool.ui.screens.complete import CompleteScreen
+
+        screen_map = {
+            "welcome": WelcomeScreen,
+            "environment": EnvironmentScreen,
+            "usb_connect": USBConnectScreen,
+            "backup": BackupScreen,
+            "customize": CustomizeScreen,
+            "build": BuildScreen,
+            "flash": FlashScreen,
+            "complete": CompleteScreen,
+        }
+
+        for name, screen_cls in screen_map.items():
+            self.install_screen(screen_cls(), name=name)
+
+        self._screens_loaded = True
+
+    def _push_welcome_screen(self) -> None:
+        """Show the welcome screen."""
+        self.push_screen("welcome")
+
+    async def _go_to_screen(self, screen_name: str) -> None:
+        """Transition to a named screen."""
+        logger.info("Navigating to screen: %s", screen_name)
+        self.current_phase = screen_name
+        self._update_phase_display(screen_name)
+
+        # Pop all screens and push the target
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+        self.push_screen(screen_name)
+
+    def _update_phase_display(self, phase: str) -> None:
+        """Update the header/subtitle for the current phase."""
+        titles = {
+            "welcome": ("LX06 Flash Tool", "Welcome"),
+            "environment": ("Phase 1: Environment", "Checking & installing dependencies"),
+            "usb_connect": ("Phase 1: USB Connection", "Connect your LX06 via USB"),
+            "backup": ("Phase 2: Backup", "Dumping & verifying partitions"),
+            "customize": ("Phase 3: Customize", "Select features for your custom firmware"),
+            "build": ("Phase 3: Build", "Building custom firmware image"),
+            "flash": ("Phase 4: Flash", "Writing firmware to device"),
+            "complete": ("Complete!", "All done"),
+        }
+        title, subtitle = titles.get(phase, (self.TITLE, ""))
+        try:
+            self.query_one("#phase-title", Static).update(title)
+            self.query_one("#phase-subtitle", Static).update(subtitle)
+        except Exception:
+            pass
+
+    # ── Module Accessors ──────────────────────────────────────────────────────
+
+    @property
+    def config(self) -> AppConfig:
+        return self._config
+
+    @property
+    def device(self) -> LX06Device | None:
+        return self._device
+
+    @device.setter
+    def device(self, value: LX06Device) -> None:
+        self._device = value
+
+    @property
+    def choices(self) -> CustomizationChoices:
+        return self._choices
+
+    @choices.setter
+    def choices(self, value: CustomizationChoices) -> None:
+        self._choices = value
+
+    @property
+    def flash_result(self) -> FlashResult | None:
+        return self._flash_result
+
+    @flash_result.setter
+    def flash_result(self, value: FlashResult) -> None:
+        self._flash_result = value
+
+    def get_env_manager(self) -> EnvironmentManager:
+        if self._env_manager is None:
+            self._env_manager = EnvironmentManager()
+        return self._env_manager
+
+    def get_usb_scanner(self) -> USBScanner:
+        if self._usb_scanner is None:
+            self._usb_scanner = USBScanner(aml_tool=self.get_aml_tool())
+        return self._usb_scanner
+
+    def get_aml_tool(self) -> AmlogicTool:
+        if self._aml_tool is None:
+            aml_path = self._config.aml_tool_path
+            if not aml_path or not aml_path.exists():
+                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
+            self._aml_tool = AmlogicTool(update_exe_path=aml_path)
+        return self._aml_tool
+
+    def get_bootloader_mgr(self) -> BootloaderManager:
+        if self._bootloader_mgr is None:
+            self._bootloader_mgr = BootloaderManager(aml_tool=self.get_aml_tool())
+        return self._bootloader_mgr
+
+    def get_backup_mgr(self) -> BackupManager:
+        if self._backup_mgr is None:
+            self._backup_mgr = BackupManager(
+                aml_tool=self.get_aml_tool(),
+                backup_dir=self._config.backup_dir,
+            )
+        return self._backup_mgr
+
+    def get_firmware_pipeline(self) -> FirmwareOrchestrator:
+        if self._firmware_pipeline is None:
+            from lx06_tool.modules.firmware import FirmwarePaths
+            build_dir = self._config.build_dir
+            backup_dir = self._config.backup_dir
+            paths = FirmwarePaths(
+                system_dump=backup_dir / "mtd4.img",
+                boot_dump=backup_dir / "mtd2.img",
+                extract_dir=build_dir / "extracted",
+                rootfs_dir=build_dir / "extracted" / "squashfs-root",
+                output_dir=build_dir / "output",
+                output_system=build_dir / "output" / "root.squashfs",
+                output_boot=build_dir / "output" / "boot.img",
+            )
+            self._firmware_pipeline = FirmwareOrchestrator(
+                paths=paths,
+                choices=self._choices,
+                runner=self._runner,
+            )
+        return self._firmware_pipeline
+
+    def get_flasher(self) -> Flasher:
+        if self._flasher is None:
+            self._flasher = Flasher(aml_tool=self.get_aml_tool())
+        return self._flasher
+
+    # ── Global Progress ───────────────────────────────────────────────────────
+
+    def update_status(self, message: str) -> None:
+        """Update the status bar message."""
+        self.status_message = message
+        try:
+            self.query_one("#status-text", Static).update(message)
+        except Exception:
+            pass
+
+    def update_progress(self, pct: float) -> None:
+        """Update the global progress bar (0-100)."""
+        try:
+            bar = self.query_one("#global-progress", ProgressBar)
+            bar.update(progress=int(pct))
+        except Exception:
+            pass
+
+    def append_log(self, stream: str, text: str) -> None:
+        """Append text to the log output."""
+        self.log_output += text + "\n"
+        lines = self.log_output.split("\n")
+        if len(lines) > 200:
+            self.log_output = "\n".join(lines[-200:])
+
+    # ── Navigation Callbacks (used by screens) ────────────────────────────────
+
+    async def on_environment_done(self, success: bool) -> None:
+        if success:
+            await self._go_to_screen("usb_connect")
+        else:
+            self.update_status("Environment setup failed. Check logs above.")
+
+    async def on_usb_connected(self, device: LX06Device) -> None:
+        self._device = device
+        await self._go_to_screen("backup")
+
+    async def on_backup_done(self, success: bool) -> None:
+        if success:
+            await self._go_to_screen("customize")
+        else:
+            self.update_status("Backup failed. Do NOT proceed without a backup!")
+
+    async def on_customize_done(self, choices: CustomizationChoices) -> None:
+        self._choices = choices
+        await self._go_to_screen("build")
+
+    async def on_build_done(self, success: bool) -> None:
+        if success:
+            await self._go_to_screen("flash")
+        else:
+            self.update_status("Firmware build failed. Check logs above.")
+
+    async def on_flash_done(self, result: FlashResult) -> None:
+        self._flash_result = result
+        await self._go_to_screen("complete")
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
+    def action_quit(self) -> None:
+        logger.info("User requested quit")
+        self.exit()
+
+    def action_refresh(self) -> None:
+        self.screen.refresh()
+
+
+# ── Entry Point ──────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    """CLI entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="lx06",
+        description="LX06 Flash Tool — Xiaomi Xiaoai Speaker Pro Custom Firmware Installer",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Run environment check only (no TUI)",
+    )
+    parser.add_argument(
+        "--backup-only", action="store_true",
+        help="Only dump partitions (no flash)",
+    )
+    parser.add_argument(
+        "--config", type=Path, default=None,
+        help="Path to config file",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Enable verbose logging",
+    )
+
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    if args.check:
+        # Non-interactive environment check
+        import asyncio as _aio
+
+        async def _check():
+            mgr = EnvironmentManager()
+            report = await mgr.check()
+            print(report.to_table())
+            if not report.ready:
+                print("Environment not ready. Run with -v for details.")
+            return report.ready
+
+        success = _aio.run(_check())
+        raise SystemExit(0 if success else 1)
+
+    app = LX06App()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()

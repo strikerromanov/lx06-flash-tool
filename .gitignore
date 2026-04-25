@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Backups and builds (user-specific)
+backups/*.img
+backups/*.bin
+build/output/
+build/extracted/
+
+# Config with secrets
+*.secret
+.env
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MyPy / Pytest
+.mypy_cache/
+.pytest_cache/
+
+# Resources binaries (large ARM64 binaries)
+resources/binaries/*.tar.gz
+resources/binaries/*.zip

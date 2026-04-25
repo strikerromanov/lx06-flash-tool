@@ -1,0 +1,2 @@
+# Amlogic USB Burning Mode - LX06 Flash Tool
+SUBSYSTEM=="usb", ATTR{idVendor}=="1b8e", ATTR{idProduct}=="c003", MODE="0666"
