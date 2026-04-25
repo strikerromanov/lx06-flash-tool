@@ -27,7 +27,7 @@ from lx06_tool.exceptions import (
     UdevRulesError,
 )
 from lx06_tool.utils.amlogic import AmlogicDeviceInfo, AmlogicTool
-from lx06_tool.utils.runner import run
+from lx06_tool.utils.sudo import sudo_run, sudo_write_file
 
 
 # ─── udev Rules ───────────────────────────────────────────────────────────────
@@ -47,54 +47,26 @@ async def install_udev_rules(
     """
     Write the Amlogic udev rule and reload the rule database.
 
-    Strategy: write content to a temp file first, then sudo cp it to
-    the destination. This avoids stdin conflicts between sudo -S
-    (password on stdin) and tee (file content on stdin).
+    Uses PTY-based sudo for reliable password authentication on all distros.
     """
-    import tempfile
-    dest_path = Path(dest)
+    # Write rules file via PTY-based sudo
+    result = await sudo_write_file(
+        UDEV_RULE_CONTENT, dest, password=sudo_password, timeout=10,
+    )
+    if not result.ok:
+        raise UdevRulesError(
+            f"Failed to write udev rules to {dest}: {result.output}"
+        )
 
-    # Write rules to a temp file first (no sudo needed)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".rules", delete=False) as tmp:
-        tmp.write(UDEV_RULE_CONTENT)
-        tmp_path = tmp.name
-
-    try:
-        # Copy temp file to destination with sudo
-        if sudo_password:
-            copy = await run(
-                ["sudo", "-S", "cp", tmp_path, str(dest_path)],
-                stdin_data=sudo_password + "\n",
-                timeout=10,
-            )
-        else:
-            copy = await run(
-                ["sudo", "cp", tmp_path, str(dest_path)],
-                timeout=10,
-            )
-        if copy.returncode != 0:
-            raise UdevRulesError(
-                f"Failed to write udev rules to {dest_path}:\n{copy.stderr}"
-            )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-    # Reload and trigger (works on all modern systemd distros)
+    # Reload and trigger udev rules
     for cmd in (
         ["udevadm", "control", "--reload-rules"],
         ["udevadm", "trigger", "--subsystem-match=usb"],
     ):
-        if sudo_password:
-            result = await run(
-                ["sudo", "-S"] + cmd,
-                stdin_data=sudo_password + "\n",
-                timeout=15,
-            )
-        else:
-            result = await run(["sudo"] + cmd, timeout=15)
-        if result.returncode != 0:
+        result = await sudo_run(cmd, password=sudo_password, timeout=15)
+        if not result.ok:
             raise UdevRulesError(
-                f"udevadm failed: sudo {' '.join(cmd)}\n{result.stderr}"
+                f"udevadm failed: sudo {' '.join(cmd)}\n{result.output}"
             )
 
 def udev_rules_installed(dest: str = UDEV_RULES_DEST) -> bool:
