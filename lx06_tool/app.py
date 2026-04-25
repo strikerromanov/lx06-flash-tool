@@ -40,6 +40,7 @@ from lx06_tool.config import (
     LX06Device,
 )
 from lx06_tool.state import StateMachine
+from lx06_tool.ui.widgets.debug_log import DebugLogPanel
 from lx06_tool.utils.amlogic import AmlogicTool
 from lx06_tool.utils.sudo import SudoContext
 logger = logging.getLogger(__name__)
@@ -125,6 +126,7 @@ class LX06App(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("d", "toggle_dark", "Dark mode", show=False),
+        Binding("ctrl+d", "toggle_debug_panel", "Debug Log", show=True),
         Binding("ctrl+r", "refresh", "Refresh", show=False),
     ]
 
@@ -174,6 +176,7 @@ class LX06App(App):
             ),
             id="main-container",
         )
+        yield DebugLogPanel(id="debug-log-panel")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -426,6 +429,14 @@ class LX06App(App):
     def action_quit(self) -> None:
         logger.info("User requested quit")
         self.exit()
+
+    def action_toggle_debug_panel(self) -> None:
+        """Toggle the global debug log panel."""
+        try:
+            panel = self.query_one("#debug-log-panel", DebugLogPanel)
+            panel.toggle_panel()
+        except Exception:
+            pass
 
     def action_refresh(self) -> None:
         self.screen.refresh()

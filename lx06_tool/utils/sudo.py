@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from lx06_tool.utils.debug_log import log_debug, log_cmd, log_ok, log_err
+
 
 @dataclass
 class SudoResult:
@@ -69,7 +71,7 @@ class SudoContext:
         self,
         cmd: list[str],
         *,
-        timeout: int = 30,
+        timeout: int = 60,
     ) -> SudoResult:
         """Run a command via sudo.
 
@@ -77,9 +79,10 @@ class SudoContext:
             cmd: Command WITHOUT "sudo" prefix — we add it.
             timeout: Seconds before killing the process.
         """
+        log_cmd(cmd)
         return await _sudo_exec(cmd, self._password, timeout)
 
-    async def sudo_write_file(self, content: str, dest: str, *, timeout: int = 15) -> SudoResult:
+    async def sudo_write_file(self, content: str, dest: str, *, timeout: int = 60) -> SudoResult:
         """Write content to a file using sudo.
 
         Strategy: write to temp file first, then sudo cp to destination.
@@ -119,7 +122,7 @@ class SudoContext:
 
 # ─── Execution Engine ──────────────────────────────────────────────────────────
 
-async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoResult:
+async def _sudo_exec(cmd: list[str], password: str, timeout: int = 60) -> SudoResult:
     """Execute a command via sudo, trying multiple approaches.
 
     Attempt order:
@@ -128,6 +131,7 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
       3. PTY-based execution (os.forkpty) for strict PAM configs
     """
     full_cmd = ["sudo"] + [str(c) for c in cmd]
+    log_debug("INFO", f"sudo_exec: attempting '{' '.join(full_cmd)}' (timeout={timeout}s)")
 
     # --- Attempt 1: Plain sudo (no password) ---
     # Works when running as root or sudoers has NOPASSWD
@@ -142,6 +146,7 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
             proc.communicate(), timeout=timeout
         )
         if proc.returncode == 0:
+            log_ok(cmd, 0, stdout.decode(errors="replace").strip()[:200])
             return SudoResult(
                 returncode=0,
                 output=stdout.decode(errors="replace").strip(),
@@ -154,41 +159,56 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
         if not needs_pw:
             # Failed for another reason (command not found, etc.)
             combined = (stdout + stderr).decode(errors="replace").strip()
+            log_err(cmd, proc.returncode or 1, combined[:200])
             return SudoResult(
                 returncode=proc.returncode or 1,
                 output=combined,
                 password_sent=False,
             )
+        log_debug("INFO", "sudo attempt 1 failed (needs password), trying method 2...")
     except asyncio.TimeoutError:
+        log_err(cmd, -1, f"sudo attempt 1 timed out after {timeout}s")
         return SudoResult(returncode=-1, output="Command timed out", password_sent=False)
-    except Exception:
+    except Exception as exc:
+        log_debug("INFO", f"sudo attempt 1 exception: {exc}")
         pass  # Fall through to next approach
 
     # No password available and sudo needs one
     if not password:
+        log_err(cmd, 1, "sudo requires a password but none was provided")
         return SudoResult(
             returncode=1,
-            output=f"sudo requires a password but none was provided",
+            output="sudo requires a password but none was provided",
             password_sent=False,
         )
 
     # --- Attempt 2: sudo -S (stdin pipe) ---
-    # This works because our commands (cp, udevadm, etc.) don't need stdin
+    log_debug("INFO", "sudo attempt 2: sudo -S with stdin pipe")
     try:
         result = await _sudo_with_stdin(full_cmd, password, timeout)
         if result.ok:
+            log_ok(cmd, result.returncode, result.output[:200])
             return result
         # If -S failed with "a terminal is required", try PTY
         if "terminal is required" not in result.output:
+            log_err(cmd, result.returncode, result.output[:200])
             return result
-    except Exception:
+        log_debug("INFO", "sudo -S failed (terminal required), trying PTY fallback...")
+    except Exception as exc:
+        log_debug("INFO", f"sudo attempt 2 exception: {exc}")
         pass
 
     # --- Attempt 3: PTY via os.forkpty() ---
-    # Last resort for distros with strict PAM that reject -S
+    log_debug("INFO", "sudo attempt 3: PTY via os.forkpty()")
     try:
-        return await _sudo_with_pty(full_cmd, password, timeout)
+        result = await _sudo_with_pty(full_cmd, password, timeout)
+        if result.ok:
+            log_ok(cmd, result.returncode, result.output[:200])
+        else:
+            log_err(cmd, result.returncode, result.output[:200])
+        return result
     except Exception as exc:
+        log_err(cmd, -1, f"All sudo methods failed: {exc}")
         return SudoResult(
             returncode=-1,
             output=f"All sudo methods failed: {exc}",
@@ -366,7 +386,7 @@ async def sudo_run(
     cmd: list[str],
     *,
     password: str = "",
-    timeout: int = 30,
+    timeout: int = 60,
 ) -> SudoResult:
     """One-shot sudo command.
 
@@ -384,7 +404,7 @@ async def sudo_write_file(
     dest: str,
     *,
     password: str = "",
-    timeout: int = 15,
+    timeout: int = 60,
 ) -> SudoResult:
     """One-shot write file via sudo."""
     ctx = SudoContext(password)

@@ -11,7 +11,6 @@ through this module so that:
   • Timeouts are enforced without risking zombie processes.
   • The caller always gets a structured RunResult, not a bare string.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional, Union
 
+from lx06_tool.utils.debug_log import log_cmd, log_ok, log_err
 
 # ─── Result Type ──────────────────────────────────────────────────────────────
 
@@ -72,6 +72,7 @@ async def run(
                   (useful for interactive sudo password prompts).
     """
     str_cmd = [str(c) for c in cmd]
+    log_cmd(str_cmd)
 
     stdout_mode = asyncio.subprocess.PIPE if capture else None
     stderr_mode = asyncio.subprocess.PIPE if capture else None
@@ -101,6 +102,12 @@ async def run(
     stdout_str = stdout_bytes.decode(errors="replace").strip() if stdout_bytes else ""
     stderr_str = stderr_bytes.decode(errors="replace").strip() if stderr_bytes else ""
     rc = proc.returncode if proc.returncode is not None else -1
+
+    if rc == 0 and not timed_out:
+        log_ok(str_cmd, rc, stdout_str[:200])
+    else:
+        combined = (stdout_str + "\n" + stderr_str).strip()
+        log_err(str_cmd, rc, combined[:200])
 
     return RunResult(
         cmd=str_cmd,
@@ -132,6 +139,8 @@ async def run_streaming(
     on_stderr : Called with each stderr line.
     """
     str_cmd = [str(c) for c in cmd]
+    log_cmd(str_cmd)
+
 
     proc = await asyncio.create_subprocess_exec(
         *str_cmd,
@@ -167,6 +176,13 @@ async def run_streaming(
         _terminate(proc)
 
     rc = proc.returncode if proc.returncode is not None else -1
+
+    if rc == 0 and not timed_out:
+        log_ok(str_cmd, rc)
+    else:
+        combined = ("\n".join(stdout_lines) + "\n" + "\n".join(stderr_lines)).strip()
+        log_err(str_cmd, rc, combined[:200])
+
     return RunResult(
         cmd=str_cmd,
         returncode=rc,
