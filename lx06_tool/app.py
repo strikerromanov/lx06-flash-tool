@@ -323,16 +323,40 @@ class LX06App(App):
     def get_aml_tool(self) -> AmlogicTool:
         """Get or create the AmlogicTool instance."""
         if self._aml_tool is None:
-            aml_path = self._config.update_exe_path
-            if aml_path:
-                aml_path = Path(aml_path)
-            if not aml_path or not aml_path.exists():
-                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
-            if not aml_path.exists():
+            from lx06_tool.constants import UPDATE_EXE_RELPATH
+
+            # Candidate paths in order of priority
+            candidates: list[Path] = []
+
+            # 1. Config-saved path (set during Environment Setup download)
+            if self._config.update_exe_path:
+                candidates.append(Path(self._config.update_exe_path))
+
+            # 2. XDG data dir (default download location)
+            candidates.append(
+                self._config.tools_dir / "aml-flash-tool" / UPDATE_EXE_RELPATH
+            )
+
+            # 3. Common fallback paths
+            candidates.extend([
+                Path("/usr/local/bin/aml-flash-tool/tools/linux-x86/update"),
+                Path("/usr/local/bin/aml-flash-tool/update"),
+                Path("tools/aml-flash-tool/tools/linux-x86/update"),
+            ])
+
+            aml_path = None
+            for candidate in candidates:
+                if candidate.exists():
+                    aml_path = candidate
+                    break
+
+            if aml_path is None:
+                searched = "\n  ".join(str(c) for c in candidates)
                 raise FileNotFoundError(
-                    f"AML tool not found at {aml_path}. "
+                    f"AML update binary not found. Searched:\n  {searched}\n"
                     f"Use Environment Setup to download it first."
                 )
+
             self._aml_tool = AmlogicTool(update_exe=aml_path)
         return self._aml_tool
 

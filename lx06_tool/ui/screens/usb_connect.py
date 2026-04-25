@@ -15,6 +15,7 @@ from lx06_tool.config import LX06Device
 from lx06_tool.modules.usb_scanner import (
     handshake_loop,
     install_udev_rules,
+    test_usb_detection,
     udev_rules_installed,
 )
 from lx06_tool.ui.widgets.copy_log import CopyLogMixin
@@ -43,6 +44,11 @@ polling to catch it. If detection fails, power-cycle and try again.
 
 \U0001f4a1 **Tip**: Enter your sudo password below — needed for USB permissions on CachyOS.
 """
+
+
+def _status_icon(ok: bool) -> str:
+    """Return a green check or red X icon."""
+    return "\u2705" if ok else "\u274c"
 
 
 class USBConnectScreen(CopyLogMixin, Screen):
@@ -80,6 +86,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
         yield RichLog(id="usb-log", highlight=True, markup=True)
         with Vertical(id="usb-actions"):
             yield Button("\U0001f4cb Copy Log", variant="default", id="copy-btn")
+            yield Button("\U0001f9ea Run Diagnostics", variant="default", id="diag-btn")
             yield Button("Start USB Scan", variant="primary", id="scan-btn")
             yield Button("Cancel", variant="error", id="cancel-btn", disabled=True)
 
@@ -87,6 +94,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
         log = self.query_one(RichLog)
         log.write("Ready. Enter your sudo password above, then click 'Start USB Scan'.")
         log.write("[dim]The sudo password enables USB access and udev rule installation.[/]")
+        log.write("[dim]Click 'Run Diagnostics' to check USB setup before scanning.[/]")
         # Register RichLog as a debug sink so all debug messages appear here
         self._debug_sink = RichLogSink(log)
         register_sink(self._debug_sink)
@@ -114,12 +122,110 @@ class USBConnectScreen(CopyLogMixin, Screen):
             except RuntimeError as exc:
                 self.query_one(RichLog).write(f"\n[yellow]{exc}[/]")
             return
-        if event.button.id == "scan-btn":
+        if event.button.id == "diag-btn":
+            self.app.run_worker(self._run_diagnostics())
+        elif event.button.id == "scan-btn":
             self.app.run_worker(self._start_scan())
         elif event.button.id == "cancel-btn":
             self.scanning = False
             self.query_one("#scan-btn", Button).disabled = False
             self.query_one("#cancel-btn", Button).disabled = True
+
+    # ─── Diagnostics ────────────────────────────────────────────────────────
+
+    async def _run_diagnostics(self) -> None:
+        """Run USB diagnostics and display pre-flight checklist."""
+        log = self.query_one(RichLog)
+        log.clear()
+
+        app = self.app
+        if not isinstance(app, LX06App):
+            return
+
+        pw = self._get_sudo_password()
+        log.write("[bold blue]\U0001f9ea Running USB Diagnostics...[/]\n")
+
+        # Get the update exe path from config if available
+        exe_path = None
+        if app.config.update_exe_path:
+            exe_path = str(app.config.update_exe_path)
+
+        diag = await test_usb_detection(
+            update_exe_path=exe_path,
+            sudo_password=pw,
+        )
+
+        # ── Pre-flight checklist ─────────────────────────────────────────
+        log.write("[bold]Pre-flight Checklist:[/]")
+        log.write(
+            f"  {_status_icon(diag['sysfs_available'])} "
+            f"sysfs available (/sys/bus/usb/devices)"
+        )
+        log.write(
+            f"  {_status_icon(diag['lsusb_installed'])} "
+            f"lsusb installed"
+        )
+        log.write(
+            f"  {_status_icon(diag['update_exe_found'])} "
+            f"update binary found"
+            + (f" ({diag['update_exe_path']})" if diag['update_exe_path'] else "")
+        )
+        log.write(
+            f"  {_status_icon(diag['update_exe_executable'])} "
+            f"update binary is executable"
+        )
+        log.write(
+            f"  {_status_icon(diag['libusb_available'])} "
+            f"libusb available"
+            + (f" ({diag['libusb_detail']})" if diag['libusb_detail'] else "")
+        )
+        log.write(
+            f"  {_status_icon(diag['udev_rules_installed'])} "
+            f"udev rules installed ({diag['udev_rules_path']})"
+        )
+        log.write(
+            f"  {_status_icon(diag['device_present_sysfs'] or diag['device_present_lsusb'])} "
+            f"Device currently visible (USB)"
+        )
+
+        # ── Binary test output ────────────────────────────────────────────
+        if diag['update_exe_test_output']:
+            log.write(f"\n[bold]Binary Test:[/]")
+            log.write(f"  [dim]{diag['update_exe_test_output']}[/]")
+
+        # ── Old rules warning ─────────────────────────────────────────────
+        if diag['old_rules_found']:
+            log.write(f"\n[yellow]\u26a0 Old conflicting udev rules found:[/]")
+            for rule in diag['old_rules_found']:
+                log.write(f"  [yellow]\u274c {rule}[/]")
+            log.write("  [dim]These will be cleaned up when you click 'Start USB Scan'.[/]")
+
+        # ── udev rules content ────────────────────────────────────────────
+        if diag['udev_rules_content']:
+            log.write(f"\n[bold]Current udev rule:[/]")
+            for line in diag['udev_rules_content'].splitlines():
+                log.write(f"  [dim]{line}[/]")
+
+        # ── Issues ────────────────────────────────────────────────────────
+        if diag['issues']:
+            log.write(f"\n[bold red]Issues ({len(diag['issues'])}):[/]")
+            for issue in diag['issues']:
+                log.write(f"  \u274c {issue}")
+
+        # ── Overall status ────────────────────────────────────────────────
+        if diag['ready_to_scan']:
+            log.write(
+                "\n[bold green]\u2705 All checks passed — ready to scan![/]"
+            )
+        else:
+            log.write(
+                "\n[bold yellow]\u26a0 Some checks failed — see issues above.[/]"
+            )
+            log.write(
+                "[dim]Fix the issues above, then try 'Start USB Scan'.[/]"
+            )
+
+    # ─── USB Scan ───────────────────────────────────────────────────────────
 
     async def _start_scan(self) -> None:
         """Start the two-phase USB handshake loop."""
@@ -138,6 +244,31 @@ class USBConnectScreen(CopyLogMixin, Screen):
             pw = app.sudo_password
 
         log.write("[bold blue]Starting USB handshake scan...[/]")
+
+        # ── Pre-flight diagnostics (quick) ────────────────────────────────
+        exe_path = None
+        if app.config.update_exe_path:
+            exe_path = str(app.config.update_exe_path)
+        diag = await test_usb_detection(
+            update_exe_path=exe_path,
+            sudo_password=pw,
+        )
+
+        # Show critical issues
+        critical_issues = [
+            i for i in diag['issues']
+            if 'Old conflicting' not in i
+        ]
+        if critical_issues:
+            log.write("[bold red]Pre-flight check failed:[/]")
+            for issue in critical_issues:
+                log.write(f"  \u274c {issue}")
+            log.write("\n[dim]Fix these issues before scanning. "
+                      "Click 'Run Diagnostics' for details.[/]")
+            self.query_one("#scan-btn", Button).disabled = False
+            self.query_one("#cancel-btn", Button).disabled = True
+            self.scanning = False
+            return
 
         # Check if update binary exists
         try:
@@ -198,7 +329,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
                     )
                 elif phase == "fast":
                     log.write(
-                        "[yellow]\u21bb Handshake failed — resetting to scan mode[/]"
+                        "[yellow]\u21bb Handshake failed \u2014 resetting to scan mode[/]"
                     )
 
             log.write("[bold]Phase 1: Fast sysfs polling (50ms intervals)...[/]")

@@ -67,9 +67,18 @@ UPDATE_EXE_RELPATH: Final[str] = "tools/linux-x86/update"
 
 # udev rules file from the Radxa repo (Ubuntu 14 era, but the rule content is fine)
 AML_UDEV_RULES_RELPATH: Final[str] = "tools/_install_/70-persistent-usb-ubuntu14.rules"
-
 # Where we install our own udev rule
 UDEV_RULES_DEST: Final[str] = "/etc/udev/rules.d/70-lx06-amlogic.rules"
+
+# Old/conflicting udev rules that should be removed before installing ours.
+# These come from older versions of aml-flash-tool, Radxa scripts,
+# or Ubuntu-specific packages that use GROUP="plugdev" (doesn't exist on Arch).
+OLD_UDEV_RULES: Final[list[str]] = [
+    "/etc/udev/rules.d/70-persistent-usb-ubuntu14.rules",
+    "/etc/udev/rules.d/99-amlogic.rules",
+    "/lib/udev/rules.d/70-persistent-usb-ubuntu14.rules",
+    "/usr/lib/udev/rules.d/70-persistent-usb-ubuntu14.rules",
+]
 
 # ─── Paths & Directories ─────────────────────────────────────────────────────
 

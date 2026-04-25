@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -177,18 +178,23 @@ class EnvironmentScreen(CopyLogMixin, Screen):
                 log.write(f"\n[yellow]Docker: {e}[/]")
 
             # Step 4: Check AML tool
+            from lx06_tool.constants import UPDATE_EXE_RELPATH
+
             tools_dir = Path(app.config.tools_dir)
-            aml_path = tools_dir / "aml-flash-tool" / "update"
+            aml_path = tools_dir / "aml-flash-tool" / UPDATE_EXE_RELPATH
+            # Also check config-saved path
+            if not aml_path.exists() and app.config.update_exe_path:
+                aml_path = Path(app.config.update_exe_path)
             # Also check common locations
             if not aml_path.exists():
-                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
+                aml_path = Path("/usr/local/bin/aml-flash-tool/tools/linux-x86/update")
             if not aml_path.exists():
-                # Check config path
-                aml_path = app.config.update_exe_path
+                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
 
             if aml_path and Path(aml_path).exists():
                 log.write(f"\n[green]AML Tool: OK[/] ({aml_path})")
                 app.config.update_exe_path = Path(aml_path)
+                app.config.save()
                 self.tools_downloaded = True
             else:
                 log.write("\n[yellow]AML Tool: Not downloaded yet[/]")
@@ -293,6 +299,35 @@ class EnvironmentScreen(CopyLogMixin, Screen):
                 app.config.update_exe_path = update_bin
                 app.config.save()
                 log.write(f"  [green]AML tool ready:[/] {update_bin}")
+
+                # Test the binary to verify it works on this system
+                try:
+                    from lx06_tool.utils.runner import run as async_run
+                    test_result = await async_run(
+                        [str(update_bin), "help"], timeout=5,
+                    )
+                    output = (test_result.stdout + test_result.stderr).strip()
+                    if output:
+                        log.write(f"  [dim]Binary test: {output[:120]}[/]")
+                    else:
+                        log.write("  [dim]Binary test: ran without output (OK)[/]")
+                except asyncio.TimeoutError:
+                    log.write("  [yellow]Warning: Binary test timed out[/]")
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    if "cannot execute" in exc_str or "exec format" in exc_str:
+                        log.write(
+                            "  [bold red]ERROR: Binary is wrong architecture "
+                            "(e.g. ARM on x86_64)![/]")
+                    elif "shared library" in exc_str or "not found" in exc_str:
+                        log.write(
+                            f"  [bold red]ERROR: Missing library: {exc}[/]\n"
+                            f"  [dim]Install libusb-compat (Arch) or "
+                            "libusb-0.1-4 (Debian).[/]"
+                        )
+                    else:
+                        log.write(f"  [yellow]Warning: Binary test error: {exc}[/]")
+
                 self.tools_downloaded = True
                 self.query_one("#download-btn", Button).disabled = True
 

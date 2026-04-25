@@ -19,12 +19,13 @@ strategy to reliably catch this narrow window:
 """
 
 from __future__ import annotations
-
 import asyncio
 import logging
+import os
+import shutil
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from lx06_tool.constants import (
     AMLOGIC_USB_PRODUCT_ID,
@@ -32,6 +33,8 @@ from lx06_tool.constants import (
     FAST_POLL_INTERVAL_S,
     HANDSHAKE_DEFAULT_TIMEOUT_S,
     HANDSHAKE_POLL_INTERVAL_S,
+    OLD_UDEV_RULES,
+    UPDATE_EXE_RELPATH,
     UDEV_RULE_LINE,
     UDEV_RULES_DEST,
 )
@@ -64,9 +67,34 @@ async def install_udev_rules(
     """
     Write the Amlogic udev rule and reload the rule database.
 
+    Cleans up old/conflicting rules first, then writes the new rule.
     Uses PTY-based sudo for reliable password authentication on all distros.
     """
-    # Write rules file via PTY-based sudo
+    # ── Clean up old/conflicting udev rules ──────────────────────────────
+    cleaned = []
+    for old_rule in OLD_UDEV_RULES:
+        old_path = Path(old_rule)
+        if old_path.exists():
+            try:
+                result = await sudo_run(
+                    ["rm", "-f", old_rule],
+                    password=sudo_password,
+                    timeout=5,
+                )
+                if result.ok:
+                    cleaned.append(old_rule)
+                    logger.info("Removed old udev rule: %s", old_rule)
+                else:
+                    logger.warning(
+                        "Failed to remove old udev rule %s: %s",
+                        old_rule, result.output,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Error removing old udev rule %s: %s", old_rule, exc
+                )
+
+    # ── Write rules file via PTY-based sudo ──────────────────────────────
     result = await sudo_write_file(
         UDEV_RULE_CONTENT, dest, password=sudo_password, timeout=10,
     )
@@ -75,7 +103,7 @@ async def install_udev_rules(
             f"Failed to write udev rules to {dest}: {result.output}"
         )
 
-    # Reload and trigger udev rules
+    # ── Reload and trigger udev rules ────────────────────────────────────
     for cmd in (
         ["udevadm", "control", "--reload-rules"],
         ["udevadm", "trigger", "--subsystem-match=usb"],
@@ -87,9 +115,69 @@ async def install_udev_rules(
             )
 
 
+async def install_udev_rules_safe(
+    dest: str = UDEV_RULES_DEST,
+    *,
+    sudo_password: str = "",
+) -> tuple[bool, list[str]]:
+    """
+    Non-throwing version of install_udev_rules.
+
+    Returns (success, messages) where messages is a list of log lines.
+    """
+    msgs: list[str] = []
+    try:
+        # Clean old rules
+        for old_rule in OLD_UDEV_RULES:
+            if Path(old_rule).exists():
+                result = await sudo_run(
+                    ["rm", "-f", old_rule],
+                    password=sudo_password, timeout=5,
+                )
+                if result.ok:
+                    msgs.append(f"Removed old rule: {old_rule}")
+                else:
+                    msgs.append(f"Warning: could not remove {old_rule}")
+
+        # Write new rule
+        result = await sudo_write_file(
+            UDEV_RULE_CONTENT, dest,
+            password=sudo_password, timeout=10,
+        )
+        if not result.ok:
+            msgs.append(f"Failed to write udev rules: {result.output}")
+            return False, msgs
+
+        # Reload
+        for cmd in (
+            ["udevadm", "control", "--reload-rules"],
+            ["udevadm", "trigger", "--subsystem-match=usb"],
+        ):
+            result = await sudo_run(
+                cmd, password=sudo_password, timeout=15,
+            )
+            if not result.ok:
+                msgs.append(f"udevadm failed: {' '.join(cmd)}")
+                return False, msgs
+
+        msgs.append("udev rules installed and reloaded.")
+        return True, msgs
+    except Exception as exc:
+        msgs.append(f"Error: {exc}")
+        return False, msgs
+
+
 def udev_rules_installed(dest: str = UDEV_RULES_DEST) -> bool:
     """Return True if the udev rules file already exists."""
     return Path(dest).exists()
+
+
+def get_udev_rules_content(dest: str = UDEV_RULES_DEST) -> str:
+    """Read the current udev rules file content, or empty string if missing."""
+    try:
+        return Path(dest).read_text().strip()
+    except OSError:
+        return ""
 
 
 # ─── Fast USB Device Detection ────────────────────────────────────────────────
@@ -170,6 +258,205 @@ async def check_usb_device_present_async() -> bool:
     if _check_sysfs():
         return True
     return await _check_lsusb()
+
+
+# ─── USB Diagnostics ──────────────────────────────────────────────────────────
+
+async def test_usb_detection(
+    update_exe_path: str | Path | None = None,
+    sudo_password: str = "",
+) -> dict[str, Any]:
+    """
+    Run all USB detection checks and return a comprehensive report.
+
+    This function is designed to be called from the UI to show a
+    pre-flight diagnostic checklist before starting the USB scan.
+
+    Returns a dict with all check results and diagnostic info.
+    """
+    from lx06_tool.utils.runner import run as async_run
+
+    results: dict[str, Any] = {
+        # Basic system checks
+        "sysfs_available": Path("/sys/bus/usb/devices").is_dir(),
+        "lsusb_installed": shutil.which("lsusb") is not None,
+
+        # Device detection
+        "device_present_sysfs": _check_sysfs(),
+        "device_present_lsusb": False,
+
+        # udev rules
+        "udev_rules_installed": udev_rules_installed(),
+        "udev_rules_path": UDEV_RULES_DEST,
+        "udev_rules_content": get_udev_rules_content(),
+
+        # Binary checks
+        "update_exe_found": False,
+        "update_exe_path": None,
+        "update_exe_executable": False,
+        "update_exe_test_output": "",
+
+        # Library checks
+        "libusb_available": False,
+        "libusb_detail": "",
+
+        # Old rules cleanup
+        "old_rules_found": [],
+
+        # Overall
+        "ready_to_scan": False,
+        "issues": [],
+    }
+
+    # ── Check for old conflicting rules ──────────────────────────────────
+    for old_rule in OLD_UDEV_RULES:
+        if Path(old_rule).exists():
+            results["old_rules_found"].append(old_rule)
+
+    # ── Check device via lsusb ───────────────────────────────────────────
+    results["device_present_lsusb"] = await _check_lsusb()
+
+    # ── Locate the update binary ─────────────────────────────────────────
+    exe_candidates = []
+    if update_exe_path:
+        exe_candidates.append(Path(update_exe_path))
+
+    # Check XDG data dir location
+    try:
+        from platformdirs import user_data_path
+        from lx06_tool.constants import APP_NAME, TOOLS_SUBDIR
+        xdg_tools = user_data_path(APP_NAME) / TOOLS_SUBDIR
+        exe_candidates.append(xdg_tools / "aml-flash-tool" / UPDATE_EXE_RELPATH)
+    except Exception:
+        pass
+
+    # Common fallback paths
+    exe_candidates.extend([
+        Path("/usr/local/bin/aml-flash-tool/update"),
+        Path("/usr/local/bin/aml-flash-tool/tools/linux-x86/update"),
+        Path("tools/aml-flash-tool/tools/linux-x86/update"),
+    ])
+
+    for candidate in exe_candidates:
+        if candidate.exists():
+            results["update_exe_found"] = True
+            results["update_exe_path"] = str(candidate)
+            results["update_exe_executable"] = os.access(candidate, os.X_OK)
+            break
+
+    # ── Check libusb ─────────────────────────────────────────────────────
+    # Check for libusb-0.1 / libusb-compat which the Amlogic binary needs
+    libusb_checks = [
+        # Direct library path checks
+        "/usr/lib/libusb.so",
+        "/usr/lib/libusb-0.1.so",
+        "/usr/lib/libusb-1.0.so",
+        "/usr/lib/x86_64-linux-gnu/libusb.so",
+        "/usr/lib/x86_64-linux-gnu/libusb-0.1.so",
+    ]
+    # Also check via ldconfig
+    try:
+        ldconfig = await async_run(["ldconfig", "-p"], timeout=5)
+        if ldconfig.returncode == 0:
+            for line in ldconfig.stdout.splitlines():
+                if "libusb" in line.lower() and ".so" in line:
+                    results["libusb_detail"] = line.strip()
+                    # libusb-0.1 is what the Amlogic binary needs
+                    if "libusb-0.1" in line or "libusb.so" in line:
+                        results["libusb_available"] = True
+                        break
+    except Exception:
+        pass
+
+    # Fallback: check if the library files exist directly
+    if not results["libusb_available"]:
+        for lib_path in libusb_checks:
+            if Path(lib_path).exists() or Path(lib_path + ".4").exists():
+                results["libusb_available"] = True
+                results["libusb_detail"] = lib_path
+                break
+
+    # Also check via pacman on Arch
+    if not results["libusb_available"]:
+        try:
+            pacman_check = await async_run(
+                ["pacman", "-Q", "libusb-compat"], timeout=5,
+            )
+            if pacman_check.returncode == 0:
+                results["libusb_available"] = True
+                results["libusb_detail"] = pacman_check.stdout.strip()
+        except Exception:
+            pass
+
+    # ── Try running the binary ───────────────────────────────────────────
+    if results["update_exe_found"] and results["update_exe_executable"]:
+        exe = Path(results["update_exe_path"])
+        try:
+            # Try 'update help' first — doesn't need a device
+            test_result = await async_run(
+                [str(exe), "help"], timeout=5,
+            )
+            output = (test_result.stdout + test_result.stderr).strip()
+            if output:
+                results["update_exe_test_output"] = f"OK: {output[:200]}"
+            else:
+                # Some versions don't have 'help', try running without args
+                test_result = await async_run(
+                    [str(exe)], timeout=5,
+                )
+                output = (test_result.stdout + test_result.stderr).strip()
+                results["update_exe_test_output"] = (
+                    f"RC={test_result.returncode}: {output[:200]}"
+                )
+        except Exception as exc:
+            results["update_exe_test_output"] = f"ERROR: {exc}"
+
+            # Check for common issues
+            exc_str = str(exc).lower()
+            if "cannot execute" in exc_str or "exec format" in exc_str:
+                results["issues"].append(
+                    "Binary is wrong architecture (e.g. ARM binary on x86_64)"
+                )
+            elif "shared library" in exc_str or "not found" in exc_str:
+                results["issues"].append(
+                    f"Missing shared library: {exc}. Install libusb-compat."
+                )
+
+    # ── Determine overall readiness ──────────────────────────────────────
+    issues = results["issues"]
+
+    if not results["sysfs_available"] and not results["lsusb_installed"]:
+        issues.append("No USB detection method available (no sysfs or lsusb)")
+
+    if not results["update_exe_found"]:
+        issues.append(
+            "AML update binary not found. Run Environment Setup to download it."
+        )
+    elif not results["update_exe_executable"]:
+        issues.append(
+            "AML update binary is not executable. Check file permissions."
+        )
+
+    if not results["libusb_available"]:
+        issues.append(
+            "libusb not detected. Install libusb-compat (Arch) or libusb-0.1-4 (Debian)."
+        )
+
+    if results["old_rules_found"]:
+        issues.append(
+            f"Old conflicting udev rules found: {', '.join(results['old_rules_found'])}. "
+            "Click Start USB Scan to clean them up."
+        )
+
+    results["ready_to_scan"] = (
+        results["update_exe_found"]
+        and results["update_exe_executable"]
+        and results["libusb_available"]
+        and (results["sysfs_available"] or results["lsusb_installed"])
+        and len([i for i in issues if "Old conflicting" not in i]) == 0
+    )
+
+    return results
 
 
 # ─── Two-Phase Handshake Loop ─────────────────────────────────────────────────
