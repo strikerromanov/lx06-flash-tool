@@ -183,20 +183,135 @@ class AmlogicTool:
     ) -> RunResult:
         """
         Dump a partition to a file.
-          update mread store <partition> normal <output_file>
+
+        Tries multiple mread syntaxes since different Amlogic tool versions
+        and device configurations expect different argument formats:
+
+          1. update mread store <partition> normal <output>  (original)
+          2. update mread <partition> <output>               (simple 2-arg)
+          3. update mread store mtd<N> normal <output>        (mtd name)
+          4. update mread <mtd-index> <output>                (numeric index)
         """
-        result = await run_streaming(
-            [self._exe, "mread", "store", partition, "normal", str(output_path)],
-            timeout=timeout,
-            on_stdout=on_progress,
-            on_stderr=on_progress,
-        )
-        if result.returncode != 0:
-            raise UpdateExeError(
-                f"mread of '{partition}' failed: {result.stderr}",
-                returncode=result.returncode,
+        log = logging.getLogger(__name__)
+
+        # Build candidate command variants to try
+        candidates = [
+            # Variant 1: full syntax with store/normal
+            ([self._exe, "mread", "store", partition, "normal", str(output_path)],
+             f"mread store {partition} normal"),
+            # Variant 2: simple 2-arg syntax (as in Radxa dump script)
+            ([self._exe, "mread", partition, str(output_path)],
+             f"mread {partition}"),
+        ]
+
+        # Try to extract mtdN index from partition name (e.g. "bootloader" -> "mtd0")
+        mtd_name = self._resolve_mtd_name(partition)
+        if mtd_name and mtd_name != partition:
+            candidates.append(
+                # Variant 3: store/mtd-name/normal
+                ([self._exe, "mread", "store", mtd_name, "normal", str(output_path)],
+                 f"mread store {mtd_name} normal"),
             )
-        return result
+            candidates.append(
+                # Variant 4: simple mtd name
+                ([self._exe, "mread", mtd_name, str(output_path)],
+                 f"mread {mtd_name}"),
+            )
+
+        # Try numeric index if mtdN
+        mtd_index = self._extract_mtd_index(partition) or self._extract_mtd_index(mtd_name or "")
+        if mtd_index is not None:
+            candidates.append(
+                ([self._exe, "mread", str(mtd_index), str(output_path)],
+                 f"mread {mtd_index}"),
+            )
+
+        last_error: Exception | None = None
+        for cmd, desc in candidates:
+            log.debug("Trying mread variant: %s", desc)
+            try:
+                result = await run_streaming(
+                    cmd,
+                    timeout=timeout,
+                    on_stdout=on_progress,
+                    on_stderr=on_progress,
+                )
+                if result.returncode == 0:
+                    log.debug("mread succeeded with variant: %s", desc)
+                    return result
+                else:
+                    last_error = UpdateExeError(
+                        f"mread variant '{desc}' failed: {result.stderr}",
+                        returncode=result.returncode,
+                    )
+                    log.debug("mread variant '%s' failed (RC=%d): %s",
+                              desc, result.returncode, result.stderr[:200])
+            except Exception as exc:
+                last_error = exc
+                log.debug("mread variant '%s' exception: %s", desc, exc)
+
+        # All variants failed
+        raise UpdateExeError(
+            f"mread of '{partition}' failed after trying {len(candidates)} syntax variants. "
+            f"Last error: {last_error}",
+            returncode=-1,
+        )
+
+    @staticmethod
+    def _resolve_mtd_name(partition: str) -> str | None:
+        """Map a partition label to its mtd device name, or return as-is if already mtdN."""
+        from lx06_tool.constants import PARTITION_MAP
+        if partition.startswith("mtd"):
+            return partition
+        for mtd_name, meta in PARTITION_MAP.items():
+            if meta.get("label") == partition:
+                return mtd_name
+        return None
+
+    @staticmethod
+    def _extract_mtd_index(name: str) -> int | None:
+        """Extract numeric index from mtd name like 'mtd0' -> 0."""
+        if name.startswith("mtd") and name[3:].isdigit():
+            return int(name[3:])
+        return None
+
+    async def list_partitions(self, timeout: int = 10) -> str:
+        """
+        Query the device for partition information.
+
+        Tries various commands to discover the partition layout:
+          - update partition (list partitions)
+          - update info (device info)
+          - bulkcmd 'printenv partitions'
+        Returns the combined output for parsing.
+        """
+        log = logging.getLogger(__name__)
+        outputs: list[str] = []
+
+        # Try 'update partition'
+        try:
+            result = await run([self._exe, "partition"], timeout=timeout)
+            if result.ok:
+                outputs.append(f"[update partition]\n{result.stdout}")
+        except Exception as exc:
+            log.debug("update partition query failed: %s", exc)
+
+        # Try 'update info'
+        try:
+            result = await run([self._exe, "info"], timeout=timeout)
+            if result.ok:
+                outputs.append(f"[update info]\n{result.stdout}")
+        except Exception as exc:
+            log.debug("update info query failed: %s", exc)
+
+        # Try bulkcmd printenv partitions
+        try:
+            result = await self.bulk_cmd("printenv partitions", timeout=timeout)
+            outputs.append(f"[bulkcmd printenv partitions]\n{result.stdout}")
+        except Exception as exc:
+            log.debug("bulkcmd printenv partitions failed: %s", exc)
+
+        return "\n\n".join(outputs) if outputs else "(no partition info available)"
 
     async def partition(
         self,

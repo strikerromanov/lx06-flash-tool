@@ -145,17 +145,16 @@ class LX06App(App):
 
         # Module instances (initialized lazily)
         self._aml_tool: AmlogicTool | None = None
-        self._sudo_context: SudoContext = SudoContext()
         # Runtime state
         self._device: LX06Device | None = None
         self._choices = CustomizationChoices()
         self._flash_result: FlashResult | None = None
+        self._backup_skipped: bool = False
 
         # Environment state (populated by environment screen)
         self._os_info: Any | None = None  # OSInfo from detect_os()
         self._dep_statuses: list[Any] = []  # list[DependencyStatus]
         self._docker_ok: bool = False
-
         self._screens_loaded = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -271,6 +270,15 @@ class LX06App(App):
     @choices.setter
     def choices(self, value: CustomizationChoices) -> None:
         self._choices = value
+
+    @property
+    def backup_skipped(self) -> bool:
+        return self._backup_skipped
+
+    @backup_skipped.setter
+    def backup_skipped(self, value: bool) -> None:
+        self._backup_skipped = value
+
 
     @property
     def flash_result(self) -> FlashResult | None:
@@ -429,7 +437,7 @@ class LX06App(App):
         await self._go_to_screen("backup")
 
     async def on_backup_done(self, success: bool) -> None:
-        if success:
+        if success or self._backup_skipped:
             await self._go_to_screen("customize")
         else:
             self.update_status("Backup failed. Do NOT proceed without a backup!")

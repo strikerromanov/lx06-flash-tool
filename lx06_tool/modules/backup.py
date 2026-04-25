@@ -84,6 +84,7 @@ async def dump_all_partitions(
     on_partition_start: Optional[Callable[[str, str], None]] = None,
     on_partition_done:  Optional[Callable[[PartitionBackup], None]] = None,
     on_line:            Optional[Callable[[str], None]] = None,
+    on_partition_skip:  Optional[Callable[[str, str], None]] = None,
 ) -> BackupSet:
     """
     Dump all MTD partitions (mtd0 through mtd6) to `backup_dir`.
@@ -93,6 +94,7 @@ async def dump_all_partitions(
     on_partition_start : Called with (mtd_name, label) at the start of each dump.
     on_partition_done  : Called with the completed PartitionBackup.
     on_line            : Called with each output line from the tool.
+    on_partition_skip  : Called with (mtd_name, reason) when a partition is skipped.
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -109,13 +111,23 @@ async def dump_all_partitions(
         if on_partition_start:
             on_partition_start(mtd_name, label)
 
-        part = await dump_partition(
-            tool, mtd_name, output, on_progress=on_line
-        )
-        backup_set.partitions[mtd_name] = part
+        try:
+            part = await dump_partition(
+                tool, mtd_name, output, on_progress=on_line
+            )
+            backup_set.partitions[mtd_name] = part
 
-        if on_partition_done:
-            on_partition_done(part)
+            if on_partition_done:
+                on_partition_done(part)
+        except (PartitionDumpError, Exception) as exc:
+            reason = str(exc)
+            # Log the failure but continue with remaining partitions
+            import logging
+            logging.getLogger(__name__).warning(
+                "Skipping partition %s (%s): %s", mtd_name, label, reason
+            )
+            if on_partition_skip:
+                on_partition_skip(mtd_name, reason)
 
     return backup_set
 
