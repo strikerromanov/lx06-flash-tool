@@ -207,15 +207,21 @@ class AmlogicTool:
         log = logging.getLogger(__name__)
         # Official aml-flash-tool.sh prepends 5 spaces to bulkcmd arguments
         spaced_cmd = self.BULKCMD_SPACE_PREFIX + cmd
-        log.debug("bulkcmd: %s", cmd)
+        log.info("[BULKCMD] Sending: '%s'", cmd)
 
         full_cmd = [self._exe, "bulkcmd", spaced_cmd]
         result = await run(full_cmd, timeout=timeout)
 
         # Official tool checks for "ERR" in output (even if RC=0)
         combined = (result.stdout + "\n" + result.stderr).strip()
+        log.info(
+            "[BULKCMD] Result: RC=%d, stdout='%s', stderr='%s'",
+            result.returncode,
+            result.stdout[:300] if result.stdout else "",
+            result.stderr[:300] if result.stderr else "",
+        )
         if "ERR" in combined.upper():
-            log.warning("bulkcmd '%s' reported error: %s", cmd, combined[:200])
+            log.warning("[BULKCMD] '%s' reported error: %s", cmd, combined[:200])
 
         # Retry with sudo if initial attempt failed and password is available
         if not result.ok and sudo_password:
@@ -300,9 +306,10 @@ class AmlogicTool:
         """
         log = logging.getLogger(__name__)
         addr_str = f"0x{addr:08X}"
-        log.debug("mread mem %s normal %d %s", addr_str, size, output_path)
+        log.info("[MREAD] Executing: mread mem %s normal %d %s", addr_str, size, output_path)
 
         cmd = [self._exe, "mread", "mem", addr_str, "normal", str(size), str(output_path)]
+        log.info("[MREAD] Full command: %s", cmd)
 
         try:
             result = await run_streaming(
@@ -313,10 +320,20 @@ class AmlogicTool:
             )
 
             if result.returncode != 0:
+                log.error(
+                    "[MREAD] FAILED: RC=%d, stderr='%s', stdout='%s'",
+                    result.returncode,
+                    result.stderr[:300] if result.stderr else "",
+                    result.stdout[:300] if result.stdout else "",
+                )
                 raise UpdateExeError(
                     f"mread mem {addr_str} normal {size} failed: {result.stderr}",
                     returncode=result.returncode,
                 )
+            log.info(
+                "[MREAD] SUCCESS: RC=%d, transferred %d bytes to %s",
+                result.returncode, size, output_path,
+            )
             return result
         except Exception as exc:
             if not sudo_password:
@@ -388,21 +405,22 @@ class AmlogicTool:
         addr_str = f"0x{addr:08X}"
 
         # Auto-query actual partition size from device
+        log.info("[DUMP] Starting dump of partition '%s' (provided size=%d / 0x%X)",
+                 partition_label, size, size)
         queried_size = await self.get_partition_size(
             partition_label, fallback_size=size, sudo_password=sudo_password,
         )
         if queried_size != size:
             log.warning(
-                "Queried partition size (%d) differs from provided size (%d) for '%s'",
-                queried_size, size, partition_label,
+                "[DUMP] Queried partition size (%d / 0x%X) differs from provided size (%d / 0x%X) for '%s'",
+                queried_size, queried_size, size, size, partition_label,
             )
-        size = queried_size
+            # Use the device-reported size — it knows its own layout better than we do
+            size = queried_size
         size_hex = f"0x{size:X}"
+        log.info("[DUMP] Final size for '%s': %d bytes (0x%X), addr=%s",
+                 partition_label, size, size, addr_str)
 
-        log.info(
-            "Dumping partition '%s' (%d bytes) via two-step process",
-            partition_label, size,
-        )
         # Step 1: Read NAND partition into device RAM
         # Try multiple U-Boot command variants for compatibility
         read_cmds = [
@@ -418,26 +436,34 @@ class AmlogicTool:
 
         read_ok = False
         last_error: str = ""
+        successful_cmd: str = ""
 
         for i, cmd in enumerate(read_cmds):
             try:
-                log.debug("Trying read command [%d]: %s", i, cmd)
+                log.info("[DUMP] Trying read command [%d/%d]: %s", i + 1, len(read_cmds), cmd)
                 result = await self.bulkcmd(cmd, timeout=30, sudo_password=sudo_password)
                 combined = (result.stdout + "\n" + result.stderr).strip()
+                log.info(
+                    "[DUMP] Read command [%d] result: RC=%d, stdout='%s', stderr='%s'",
+                    i, result.returncode,
+                    result.stdout[:200] if result.stdout else "",
+                    result.stderr[:200] if result.stderr else "",
+                )
 
                 if result.returncode == 0 and "ERR" not in combined.upper():
-                    log.debug("Read command [%d] succeeded: %s", i, cmd)
+                    log.info("[DUMP] Read command [%d] SUCCEEDED: %s", i, cmd)
                     read_ok = True
+                    successful_cmd = cmd
                     break
                 else:
                     last_error = combined[:200]
-                    log.debug(
-                        "Read command [%d] returned error (RC=%d): %s",
+                    log.warning(
+                        "[DUMP] Read command [%d] returned error (RC=%d): %s",
                         i, result.returncode, last_error,
                     )
             except Exception as exc:
                 last_error = str(exc)
-                log.debug("Read command [%d] exception: %s", i, exc)
+                log.warning("[DUMP] Read command [%d] exception: %s", i, exc)
 
         if not read_ok:
             raise UpdateExeError(
@@ -446,10 +472,19 @@ class AmlogicTool:
                 returncode=-1,
             )
 
+        log.info(
+            "[DUMP] NAND→RAM complete for '%s' using: %s",
+            partition_label, successful_cmd,
+        )
+
         # Step 2: Dump device memory to host file
         if on_progress:
             on_progress(f"Dumping {partition_label} from device memory...")
 
+        log.info(
+            "[DUMP] RAM→host: mread mem %s normal %d %s",
+            addr_str, size, output_path,
+        )
         result = await self.mread_mem(
             addr=addr,
             size=size,
@@ -459,8 +494,62 @@ class AmlogicTool:
             sudo_password=sudo_password,
         )
 
+        # POST-DUMP VALIDATION: Check the dump file immediately
+        if output_path.exists():
+            actual_size = output_path.stat().st_size
+            log.info("[DUMP] Output file size: %d bytes (expected %d)", actual_size, size)
+
+            # Read and log first 32 bytes for diagnostics
+            with open(output_path, 'rb') as f:
+                header = f.read(32)
+            header_hex = header.hex()
+            log.info("[DUMP] First 32 bytes (hex): %s", header_hex)
+
+            # Check for squashfs magic bytes
+            squashfs_magic = [b'hsqs', b'sqsh']
+            magic_found = None
+            for magic in squashfs_magic:
+                if header[:4] == magic:
+                    magic_found = magic.decode('ascii')
+                    break
+
+            if magic_found:
+                log.info("[DUMP] ✓ Valid squashfs magic detected: '%s'", magic_found)
+            else:
+                log.warning(
+                    "[DUMP] ✗ NO squashfs magic! First 4 bytes: %s (%s). "
+                    "Expected 'hsqs' (68737173) or 'sqsh' (73716873).",
+                    header_hex[:8],
+                    header[:4],
+                )
+                # Try to identify what it actually is
+                try:
+                    if header[:4] == b'\x00\x00\x00\x00':
+                        log.warning("[DUMP] Data appears to be ALL ZEROS — NAND read likely failed silently")
+                    elif header[:2] == b'\xff\xff':
+                        log.warning("[DUMP] Data appears to be 0xFF padded — likely unread NAND")
+                    elif header[:4] == b'UBI#':
+                        log.warning("[DUMP] Data is UBI format, not squashfs — partition may use UBI/UBIFS")
+                    elif header[:2] == b'\x1f\x8b':
+                        log.warning("[DUMP] Data is gzip compressed — unexpected for raw partition dump")
+                except Exception:
+                    pass
+
+            # Also try running `file` command for identification
+            try:
+                from lx06_tool.utils.runner import run as sync_run
+                file_result = await sync_run(
+                    ["file", str(output_path)], timeout=5,
+                )
+                if file_result.stdout:
+                    log.info("[DUMP] file command: %s", file_result.stdout.strip())
+            except Exception:
+                pass
+        else:
+            log.error("[DUMP] Output file was NOT created: %s", output_path)
+
         log.info(
-            "Partition '%s' dumped: %d bytes -> %s",
+            "[DUMP] Partition '%s' dump complete: %d bytes -> %s",
             partition_label, size, output_path,
         )
         return result
@@ -508,7 +597,7 @@ class AmlogicTool:
                     returncode=-1,
                 )
 
-        log.debug("mread: partition='%s' label='%s' size=%d", partition, label, size)
+        log.info("[MREAD] Resolved: partition='%s' label='%s' size=%d (0x%X)", partition, label, size, size)
         return await self.dump_partition(
             partition_label=label,
             size=size,
@@ -517,6 +606,107 @@ class AmlogicTool:
             on_progress=on_progress,
             sudo_password=sudo_password,
         )
+
+    # ─── Diagnostics ─────────────────────────────────────────────────
+
+    async def dump_diagnostic(
+        self,
+        *,
+        sudo_password: str = "",
+    ) -> dict[str, str]:
+        """Run diagnostic checks to verify dump connectivity.
+
+        Tests the two-step NAND dump process with a small read to verify:
+        1. Device is responsive to bulkcmd
+        2. Partition table can be queried
+        3. store read.part command works
+        4. mread can transfer data from device RAM to host
+
+        Returns dict with diagnostic results.
+        """
+        import tempfile
+        log = logging.getLogger(__name__)
+        results: dict[str, str] = {}
+
+        # Test 1: Basic bulkcmd responsiveness
+        log.info("[DIAG] Test 1: Basic bulkcmd responsiveness")
+        try:
+            result = await self.bulkcmd("echo test123", timeout=10, sudo_password=sudo_password)
+            results["bulkcmd_echo"] = f"RC={result.returncode} out={result.stdout[:100]}"
+            log.info("[DIAG] Echo test: %s", results["bulkcmd_echo"])
+        except Exception as exc:
+            results["bulkcmd_echo"] = f"FAIL: {exc}"
+            log.error("[DIAG] Echo test failed: %s", exc)
+
+        # Test 2: Query partition table
+        log.info("[DIAG] Test 2: Query partition table")
+        try:
+            table = await self.query_partition_table(sudo_password=sudo_password)
+            results["partition_table"] = str(table)
+            log.info("[DIAG] Partition table: %s", table)
+        except Exception as exc:
+            results["partition_table"] = f"FAIL: {exc}"
+            log.error("[DIAG] Partition table query failed: %s", exc)
+
+        # Test 3: Try store list_part
+        log.info("[DIAG] Test 3: store list_part")
+        try:
+            result = await self.bulkcmd("store list_part", timeout=10, sudo_password=sudo_password)
+            results["store_list_part"] = f"RC={result.returncode} out={result.stdout[:200]}"
+            log.info("[DIAG] store list_part: %s", results["store_list_part"])
+        except Exception as exc:
+            results["store_list_part"] = f"FAIL: {exc}"
+
+        # Test 4: printenv partitions
+        log.info("[DIAG] Test 4: printenv partitions")
+        try:
+            result = await self.bulkcmd("printenv partitions", timeout=10, sudo_password=sudo_password)
+            results["printenv_partitions"] = f"RC={result.returncode} out={result.stdout[:200]}"
+            log.info("[DIAG] printenv partitions: %s", results["printenv_partitions"])
+        except Exception as exc:
+            results["printenv_partitions"] = f"FAIL: {exc}"
+
+        # Test 5: Small NAND read test (bootloader = 1MB = smallest partition)
+        log.info("[DIAG] Test 5: Small NAND read test (bootloader, 512 bytes)")
+        try:
+            addr_str = f"0x{self.NAND_WORK_ADDR:08X}"
+            # Try reading just 512 bytes from bootloader
+            result = await self.bulkcmd(
+                f"store read.part bootloader {addr_str} 0 0x200",
+                timeout=10,
+                sudo_password=sudo_password,
+            )
+            results["nand_read_bl"] = f"RC={result.returncode} out={result.stdout[:200]}"
+            log.info("[DIAG] NAND read bootloader: %s", results["nand_read_bl"])
+
+            # Try dumping those 512 bytes to a temp file
+            with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                mread_result = await self.mread_mem(
+                    addr=self.NAND_WORK_ADDR,
+                    size=512,
+                    output_path=tmp_path,
+                    timeout=30,
+                    sudo_password=sudo_password,
+                )
+                if tmp_path.exists():
+                    data = tmp_path.read_bytes()
+                    results["small_dump"] = (
+                        f"size={len(data)} bytes, "
+                        f"first_16_hex={data[:16].hex()}"
+                    )
+                    log.info("[DIAG] Small dump: %s", results["small_dump"])
+                else:
+                    results["small_dump"] = "FAIL: temp file not created"
+            finally:
+                tmp_path.unlink(missing_ok=True)
+        except Exception as exc:
+            results["nand_read_test"] = f"FAIL: {exc}"
+            log.error("[DIAG] NAND read test failed: %s", exc)
+
+        log.info("[DIAG] All diagnostics complete: %s", list(results.keys()))
+        return results
 
     # ─── Partition Listing ─────────────────────────────────────────────
 
