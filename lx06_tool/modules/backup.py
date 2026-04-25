@@ -224,3 +224,83 @@ async def verify_backup(backup_set: BackupSet) -> None:
         part.verified = True
 
     backup_set.all_verified = all(p.verified for p in backup_set.partitions.values())
+
+
+# ─── Report Generation ───────────────────────────────────────────────────────────
+
+def generate_backup_report(backup_set: BackupSet) -> str:
+    """
+    Generate a human-readable summary report for a BackupSet.
+
+    Returns a formatted string with timestamp, partition details,
+    sizes, checksums, and verification status suitable for display
+    in a UI log or console output.
+    """
+    lines = [
+        "",
+        "=" * 70,
+        "  BACKUP SUMMARY REPORT",
+        "=" * 70,
+        "",
+    ]
+
+    # Timestamp and location
+    if backup_set.timestamp:
+        lines.append(f"  Timestamp: {backup_set.timestamp}")
+    if backup_set.backup_dir:
+        lines.append(f"  Location:  {backup_set.backup_dir}")
+    lines.append("")
+
+    # Partition details
+    lines.append(f"  Partitions Backed Up: {len(backup_set.partitions)}")
+    lines.append("")
+    lines.append("  " + "-" * 66)
+    lines.append(f"  {'Partition':<12} {'Label':<12} {'Size (MB)':<12} {'SHA256':<8} {'Verified':<10}")
+    lines.append("  " + "-" * 66)
+
+    # Sort partitions by name for consistent output
+    for mtd_name in sorted(backup_set.partitions.keys()):
+        part = backup_set.partitions[mtd_name]
+
+        # Calculate size in MB
+        size_mb = f"{part.size_bytes / (1024 * 1024):.2f}" if part.size_bytes > 0 else "N/A"
+
+        # Checksum status
+        sha256_status = "[green]✓[/]" if part.sha256 else "[red]✗[/]"
+
+        # Verification status
+        if part.verified:
+            verified_status = "[green]YES[/]"
+        elif part.sha256:
+            verified_status = "[yellow]PENDING[/]"
+        else:
+            verified_status = "[red]NO[/]"
+
+        lines.append(
+            f"  {mtd_name:<12} {part.label:<12} {size_mb:<12} "
+            f"{sha256_status:<8} {verified_status:<10}"
+        )
+
+        # Add full SHA256 for reference (truncated for display)
+        if part.sha256:
+            sha256_short = part.sha256[:16] + "..."
+            lines.append(f"    SHA256: {sha256_short}")
+
+    lines.append("  " + "-" * 66)
+    lines.append("")
+
+    # Overall status
+    if backup_set.all_verified:
+        lines.append("[bold green]  ✓ All backups verified successfully![/]")
+    else:
+        verified_count = sum(1 for p in backup_set.partitions.values() if p.verified)
+        total_count = len(backup_set.partitions)
+        lines.append(
+            f"[yellow]  ⚠ Verification: {verified_count}/{total_count} partitions verified[/]"
+        )
+
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("")
+
+    return "\n".join(lines)

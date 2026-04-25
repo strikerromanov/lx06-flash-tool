@@ -46,6 +46,7 @@ PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
     "mtd2": {"label": "boot0",      "size": 0x800000},   #  8 MB
     "mtd3": {"label": "boot1",      "size": 0x800000},   #  8 MB
     "mtd4": {"label": "system0",    "size": 0x2000000},  # 32 MB — SquashFS rootfs A
+    "mtd5": {"label": "system1",    "size": 0x2000000},  # 32 MB — SquashFS rootfs B
     "mtd6": {"label": "data",       "size": 0x800000},   #  8 MB
 }
 
