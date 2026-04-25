@@ -74,7 +74,7 @@ class EnvironmentScreen(Screen):
             report = await mgr.check()
 
             log.write(f"\n[bold]OS:[/] {report.os_info.name} {report.os_info.version}")
-            log.write(f"[bold]Package Manager:[/] {report.package_manager or 'Not found'}")
+            log.write(f"[bold]Package Manager:[/] {report.pkg_manager or 'Not found'}")
 
             if report.missing_packages:
                 log.write(f"\n[bold yellow]Missing packages:[/]")
@@ -86,16 +86,10 @@ class EnvironmentScreen(Screen):
                 self.query_one("#continue-btn", Button).disabled = False
                 self.query_one("#install-btn", Button).disabled = True
 
-            if report.warnings:
-                log.write(f"\n[bold yellow]Warnings:[/]")
-                for w in report.warnings:
-                    log.write(f"  - {w}")
-
-            if report.docker_ok:
+            if report.docker_available:
                 log.write("\n[green]Docker: OK[/]")
             else:
                 log.write("\n[yellow]Docker: Not available (needed for isolated builds)[/]")
-
             self.check_complete = True
             app.update_status("Environment check complete")
 
@@ -116,14 +110,16 @@ class EnvironmentScreen(Screen):
             report = await mgr.check()
 
             if report.missing_packages:
-                result = await mgr.install_dependencies(report.missing_packages)
-                log.write(f"\n[green]Installed {len(result.installed)} packages[/]")
-                if result.failed:
-                    log.write(f"[red]Failed: {result.failed}[/]")
+                await mgr.install_dependencies(
+                    report.pkg_manager,
+                    report.missing_packages,
+                    on_output=lambda lvl, line: log.write(line),
+                )
+                log.write("\n[green]Dependencies installed.[/]")
 
             # Re-check
             report = await mgr.check()
-            if report.ready:
+            if report.all_ready:
                 log.write("\n[bold green]All dependencies now satisfied![/]")
                 self.query_one("#continue-btn", Button).disabled = False
                 self.query_one("#install-btn", Button).disabled = True
