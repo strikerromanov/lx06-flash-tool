@@ -314,6 +314,18 @@ class FirmwareOrchestrator:
                     except OSError:
                         pass
         return total
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        """Calculate total size of a directory tree."""
+        total = 0
+        if path.exists():
+            for p in path.rglob("*"):
+                if p.is_file():
+                    try:
+                        total += p.stat().st_size
+                    except OSError:
+                        pass
+        return total
 
     @staticmethod
     def determine_target_slot(active_slot: str) -> tuple[str, str, str]:
@@ -324,9 +336,132 @@ class FirmwareOrchestrator:
 
         Returns:
             Tuple of (system_mtd, boot_mtd, slot_label).
-            e.g. ("mtd5", "mtd3", "system1") if active is system0.
+            e.g. ("mtd5", "mtd3", "system0") if active is system0.
         """
         if active_slot in ("system0", "mtd5"):
             return "mtd5", "mtd3", "system0"
         else:
             return "mtd6", "mtd4", "system1"
+
+
+# ── Standalone Device Extraction Helpers ─────────────────────────────────────
+
+
+async def extract_partition_from_device(
+    tool: "AmlogicTool",
+    partition_label: str,
+    output_path: Path,
+    *,
+    on_progress: "Callable[[str], None] | None" = None,
+) -> Path:
+    """Extract a partition directly from a connected device.
+
+    Uses AmlogicTool.mread() to dump the named partition to output_path.
+    This is used when the user skipped backup and we need to extract
+    the system/boot images directly from the device for firmware customization.
+
+    Args:
+        tool: Connected AmlogicTool instance.
+        partition_label: Partition label (e.g. "system0", "boot0").
+        output_path: Where to save the dumped partition.
+        on_progress: Optional callback for progress output lines.
+
+    Returns:
+        Path to the extracted partition image.
+
+    Raises:
+        FirmwareError: If extraction fails.
+    """
+    from lx06_tool.utils.amlogic import AmlogicTool  # noqa: F811
+    from lx06_tool.exceptions import UpdateExeError
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Extracting partition '%s' directly from device -> %s",
+        partition_label,
+        output_path,
+    )
+
+    try:
+        await tool.mread(
+            partition=partition_label,
+            output_path=output_path,
+            timeout=180,
+            on_progress=on_progress,
+        )
+    except UpdateExeError as exc:
+        raise FirmwareError(
+            f"Failed to extract '{partition_label}' from device: {exc}",
+            details="Ensure device is connected and in USB bootloader mode.",
+        ) from exc
+
+    if not output_path.exists():
+        raise FirmwareError(
+            f"Partition extraction produced no output: {output_path}",
+            details="The mread command appeared to succeed but no file was created.",
+        )
+
+    size = output_path.stat().st_size
+    logger.info(
+        "Extracted partition '%s': %d bytes", partition_label, size,
+    )
+    return output_path
+
+
+async def extract_active_system_from_device(
+    tool: "AmlogicTool",
+    output_dir: Path,
+    *,
+    on_progress: "Callable[[str], None] | None" = None,
+) -> tuple[Path, str]:
+    """Extract the active system partition from a connected device.
+
+    Determines which system slot is active (system0 or system1) and extracts
+    both the system and corresponding boot partition.
+
+    Args:
+        tool: Connected AmlogicTool instance.
+        output_dir: Directory to save extracted images.
+        on_progress: Optional callback for progress output lines.
+
+    Returns:
+        Tuple of (system_image_path, active_slot_label).
+        e.g. (Path(".../mtd4_system0.img"), "system0")
+    """
+    from lx06_tool.constants import PARTITION_MAP
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Try to determine active slot via boot environment
+    active_slot = "system0"  # default assumption
+    try:
+        result = await tool.bulk_cmd("printenv boot_part", timeout=10)
+        output = result.stdout + result.stderr
+        if "system1" in output or "boot1" in output:
+            active_slot = "system1"
+            logger.info("Active system slot detected: system1")
+        else:
+            logger.info(
+                "Active system slot: system0 (default, boot_part=%s)",
+                output.strip(),
+            )
+    except Exception as exc:
+        logger.debug("Could not determine active slot, defaulting to system0: %s", exc)
+
+    # Map active slot to mtd names
+    slot_mtd_map = {
+        "system0": ("mtd4", "system0", "boot0"),
+        "system1": ("mtd5", "system1", "boot1"),
+    }
+    mtd_name, sys_label, boot_label = slot_mtd_map[active_slot]
+
+    # Extract system partition
+    system_path = output_dir / f"{mtd_name}_{sys_label}.img"
+    if on_progress:
+        on_progress(f"Extracting {sys_label} partition from device...")
+    await extract_partition_from_device(
+        tool, sys_label, system_path, on_progress=on_progress,
+    )
+
+    return system_path, active_slot

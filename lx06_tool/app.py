@@ -369,20 +369,30 @@ class LX06App(App):
             self._aml_tool = AmlogicTool(update_exe=aml_path)
         return self._aml_tool
 
-    def get_firmware_pipeline(self) -> Any:
+    def get_firmware_pipeline(
+        self,
+        system_dump_override: Path | None = None,
+        boot_dump_override: Path | None = None,
+    ) -> Any:
         """Get the firmware build pipeline.
 
-        Note: FirmwareOrchestrator is not part of the reviewed module set.
-        This accessor provides a compatibility shim.
+        Args:
+            system_dump_override: Override path for system partition dump.
+                When backup was skipped, this points to a device-extracted image.
+            boot_dump_override: Override path for boot partition dump.
         """
         from lx06_tool.modules.firmware import FirmwareOrchestrator, FirmwarePaths
         from lx06_tool.utils.compat import AsyncRunner
 
         build_dir = self._config.build_dir
         backup_dir = self._config.backup_dir
+
+        system_dump = system_dump_override or backup_dir / "mtd4_system0.img"
+        boot_dump = boot_dump_override or backup_dir / "mtd2_boot0.img"
+
         paths = FirmwarePaths(
-            system_dump=backup_dir / "mtd4_system0.img",
-            boot_dump=backup_dir / "mtd2_boot0.img",
+            system_dump=system_dump,
+            boot_dump=boot_dump if boot_dump.exists() else None,
             extract_dir=build_dir / "extracted",
             rootfs_dir=build_dir / "extracted" / "squashfs-root",
             output_dir=build_dir / "output",
