@@ -88,7 +88,7 @@ lx06_tool/
 git clone https://github.com/strikerromanov/lx06-flash-tool.git
 cd lx06-flash-tool
 pip install -e .
-lx06
+lx06-tool
 ```
 
 ### Arch Linux (and other PEP 668 systems)
@@ -102,7 +102,7 @@ cd lx06-flash-tool
 python -m venv venv
 source venv/bin/activate
 pip install -e .
-lx06
+lx06-tool
 ```
 
 **Fish shell:**
@@ -112,19 +112,19 @@ cd lx06-flash-tool
 python -m venv venv
 source venv/bin/activate.fish
 pip install -e .
-lx06
+lx06-tool
 ```
 
 ### One-liners
 
 **Bash/Zsh:**
 ```bash
-git clone https://github.com/strikerromanov/lx06-flash-tool.git && cd lx06-flash-tool && python -m venv venv && source venv/bin/activate && pip install -e . && lx06
+git clone https://github.com/strikerromanov/lx06-flash-tool.git && cd lx06-flash-tool && python -m venv venv && source venv/bin/activate && pip install -e . && lx06-tool
 ```
 
 **Fish:**
 ```fish
-git clone https://github.com/strikerromanov/lx06-flash-tool.git; and cd lx06-flash-tool; and python -m venv venv; and source venv/bin/activate.fish; and pip install -e .; and lx06
+git clone https://github.com/strikerromanov/lx06-flash-tool.git; and cd lx06-flash-tool; and python -m venv venv; and source venv/bin/activate.fish; and pip install -e .; and lx06-tool
 ```
 
 ## Requirements
