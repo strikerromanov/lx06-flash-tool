@@ -81,7 +81,7 @@ HANDSHAKE_BOOTLOADER_WINDOW_SEC: Final = 2  # The bootloader's USB window durati
 # aml-flash-tool from Radxa (contains update.exe)
 
 AML_FLASH_TOOL_REPO: Final = "https://github.com/radxa/aml-flash-tool"
-AML_FLASH_TOOL_VERSION: Final = "main"  # Branch or tag
+AML_FLASH_TOOL_VERSION: Final = "master"  # Branch or tag
 
 # Reference repositories
 XIAOAI_PATCH_REPO: Final = "https://github.com/duhow/xiaoai-patch"

@@ -12,11 +12,12 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Markdown, RichLog, Static
 
 from lx06_tool.app import LX06App
+from lx06_tool.ui.widgets.copy_log import CopyLogMixin
 
 logger = logging.getLogger(__name__)
 
 
-class EnvironmentScreen(Screen):
+class EnvironmentScreen(CopyLogMixin, Screen):
     """Environment setup screen — checks and installs dependencies."""
 
     DEFAULT_CSS = """
@@ -63,6 +64,7 @@ class EnvironmentScreen(Screen):
                 id="sudo-input",
             )
         with Vertical(id="env-actions"):
+            yield Button("📋 Copy Log", variant="default", id="copy-btn")
             yield Button("Check Environment", variant="primary", id="check-btn")
             yield Button("Install Missing", variant="warning", id="install-btn", disabled=True)
             yield Button("Download Tools", variant="primary", id="download-btn", disabled=True)
@@ -82,6 +84,12 @@ class EnvironmentScreen(Screen):
             return ""
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "copy-btn":
+            try:
+                self.copy_log_to_clipboard()
+            except RuntimeError as exc:
+                self.query_one(RichLog).write(f"\n[yellow]{exc}[/]")
+            return
         if event.button.id == "check-btn":
             self.app.run_worker(self._run_check())
         elif event.button.id == "install-btn":
