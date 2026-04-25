@@ -17,6 +17,8 @@ from lx06_tool.modules.usb_scanner import (
     install_udev_rules,
     udev_rules_installed,
 )
+from lx06_tool.ui.widgets.copy_log import CopyLogMixin
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ The tool will automatically detect the device during the handshake window.
 """
 
 
-class USBConnectScreen(Screen):
+class USBConnectScreen(CopyLogMixin, Screen):
     """USB connection screen \u2014 guides user through device handshake."""
 
     DEFAULT_CSS = """
@@ -72,12 +74,20 @@ class USBConnectScreen(Screen):
             )
         yield RichLog(id="usb-log", highlight=True, markup=True)
         with Vertical(id="usb-actions"):
+            yield Button("\U0001f4cb Copy Log", variant="default", id="copy-btn")
             yield Button("Start USB Scan", variant="primary", id="scan-btn")
             yield Button("Cancel", variant="error", id="cancel-btn", disabled=True)
 
     def on_mount(self) -> None:
         log = self.query_one(RichLog)
         log.write("Ready. Enter your sudo password above, then click 'Start USB Scan'.")
+        # Register RichLog as a debug sink so all debug messages appear here
+        self._debug_sink = RichLogSink(log)
+        register_sink(self._debug_sink)
+
+    def on_unmount(self) -> None:
+        # Unregister our debug sink when leaving this screen
+        unregister_sink(self._debug_sink)
 
     def _get_sudo_password(self) -> str:
         """Get the sudo password from the input field and sync to app."""
@@ -92,6 +102,12 @@ class USBConnectScreen(Screen):
         return pw
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "copy-btn":
+            try:
+                self.copy_log_to_clipboard()
+            except RuntimeError as exc:
+                self.query_one(RichLog).write(f"\n[yellow]{exc}[/]")
+            return
         if event.button.id == "scan-btn":
             self.app.run_worker(self._start_scan())
         elif event.button.id == "cancel-btn":

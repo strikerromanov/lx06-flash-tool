@@ -10,6 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Markdown, ProgressBar, RichLog
 
 from lx06_tool.app import LX06App
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,13 @@ class BuildScreen(Screen):
             yield Button("Continue", variant="success", id="continue-btn", disabled=True)
 
     def on_mount(self) -> None:
-        self.query_one(RichLog).write("Ready to build custom firmware. Click 'Start Build' to begin.")
+        log = self.query_one(RichLog)
+        log.write("Ready to build custom firmware. Click 'Start Build' to begin.")
+        self._debug_sink = RichLogSink(log)
+        register_sink(self._debug_sink)
+
+    def on_unmount(self) -> None:
+        unregister_sink(self._debug_sink)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":

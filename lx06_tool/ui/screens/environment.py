@@ -22,6 +22,7 @@ from lx06_tool.modules.environment import (
     install_udev_rules,
 )
 from lx06_tool.ui.widgets.copy_log import CopyLogMixin
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,16 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             yield Button("Continue", variant="success", id="continue-btn", disabled=True)
 
     def on_mount(self) -> None:
-        self.query_one(RichLog).write(
+        log = self.query_one(RichLog)
+        log.write(
             "Ready to check environment. Click 'Check Environment' to start.\n"
             "Enter your sudo password above if packages need to be installed."
         )
+        self._debug_sink = RichLogSink(log)
+        register_sink(self._debug_sink)
+
+    def on_unmount(self) -> None:
+        unregister_sink(self._debug_sink)
 
     def _get_sudo_password(self) -> str:
         """Get the sudo password from the input field and sync to app."""

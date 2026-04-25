@@ -32,6 +32,11 @@ from typing import Optional
 
 from lx06_tool.utils.debug_log import log_debug, log_cmd, log_ok, log_err
 
+# Per-tier timeout: if a method doesn't succeed in 10s, it won't at all
+_TIER_TIMEOUT = 10
+# Total cascade timeout across all tiers
+_TOTAL_TIMEOUT = 30
+
 
 @dataclass
 class SudoResult:
@@ -71,18 +76,18 @@ class SudoContext:
         self,
         cmd: list[str],
         *,
-        timeout: int = 60,
+        timeout: int = 30,
     ) -> SudoResult:
         """Run a command via sudo.
 
         Args:
             cmd: Command WITHOUT "sudo" prefix — we add it.
-            timeout: Seconds before killing the process.
+            timeout: Total seconds before giving up (max 30s).
         """
         log_cmd(cmd)
-        return await _sudo_exec(cmd, self._password, timeout)
+        return await _sudo_exec(cmd, self._password, min(timeout, _TOTAL_TIMEOUT))
 
-    async def sudo_write_file(self, content: str, dest: str, *, timeout: int = 60) -> SudoResult:
+    async def sudo_write_file(self, content: str, dest: str, *, timeout: int = 30) -> SudoResult:
         """Write content to a file using sudo.
 
         Strategy: write to temp file first, then sudo cp to destination.
@@ -122,19 +127,31 @@ class SudoContext:
 
 # ─── Execution Engine ──────────────────────────────────────────────────────────
 
-async def _sudo_exec(cmd: list[str], password: str, timeout: int = 60) -> SudoResult:
+async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoResult:
     """Execute a command via sudo, trying multiple approaches.
 
     Attempt order:
       1. Plain sudo (works when root or NOPASSWD)
       2. sudo -S with password piped via stdin
       3. PTY-based execution (os.forkpty) for strict PAM configs
+
+    Each tier gets up to 10s. Total cascade capped at ``timeout`` seconds.
+    Fast-fails on password-related errors without waiting for full timeout.
     """
     full_cmd = ["sudo"] + [str(c) for c in cmd]
-    log_debug("INFO", f"sudo_exec: attempting '{' '.join(full_cmd)}' (timeout={timeout}s)")
+    pw_len = len(password) if password else 0
+    log_debug("INFO", f"sudo_exec: '{' '.join(full_cmd)}' (timeout={timeout}s, password={'***' if pw_len else 'none'}({pw_len}chars))")
+
+    deadline = time.monotonic() + timeout
 
     # --- Attempt 1: Plain sudo (no password) ---
-    # Works when running as root or sudoers has NOPASSWD
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        log_err(cmd, -1, "sudo cascade: no time remaining")
+        return SudoResult(returncode=-1, output="Command timed out (cascade timeout)", password_sent=False)
+
+    tier_timeout = min(_TIER_TIMEOUT, remaining)
+    log_debug("INFO", f"sudo tier 1: plain sudo (timeout={tier_timeout:.0f}s)")
     try:
         proc = await asyncio.create_subprocess_exec(
             *full_cmd,
@@ -143,7 +160,7 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 60) -> SudoRe
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
+            proc.communicate(), timeout=tier_timeout
         )
         if proc.returncode == 0:
             log_ok(cmd, 0, stdout.decode(errors="replace").strip()[:200])
@@ -165,13 +182,16 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 60) -> SudoRe
                 output=combined,
                 password_sent=False,
             )
-        log_debug("INFO", "sudo attempt 1 failed (needs password), trying method 2...")
+        # Fast-fail: needs password, skip to next tier immediately
+        log_debug("INFO", "sudo tier 1: needs password (fast-fail), moving to tier 2")
     except asyncio.TimeoutError:
-        log_err(cmd, -1, f"sudo attempt 1 timed out after {timeout}s")
-        return SudoResult(returncode=-1, output="Command timed out", password_sent=False)
+        log_debug("INFO", f"sudo tier 1: timed out after {tier_timeout:.0f}s")
+        try:
+            proc.kill()
+        except Exception:
+            pass
     except Exception as exc:
-        log_debug("INFO", f"sudo attempt 1 exception: {exc}")
-        pass  # Fall through to next approach
+        log_debug("INFO", f"sudo tier 1 exception: {exc}")
 
     # No password available and sudo needs one
     if not password:
@@ -183,25 +203,39 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 60) -> SudoRe
         )
 
     # --- Attempt 2: sudo -S (stdin pipe) ---
-    log_debug("INFO", "sudo attempt 2: sudo -S with stdin pipe")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        log_err(cmd, -1, "sudo cascade: no time remaining after tier 1")
+        return SudoResult(returncode=-1, output="Command timed out (cascade timeout)", password_sent=False)
+
+    tier_timeout = min(_TIER_TIMEOUT, remaining)
+    log_debug("INFO", f"sudo tier 2: sudo -S with stdin pipe (timeout={tier_timeout:.0f}s)")
     try:
-        result = await _sudo_with_stdin(full_cmd, password, timeout)
+        result = await _sudo_with_stdin(full_cmd, password, tier_timeout)
         if result.ok:
             log_ok(cmd, result.returncode, result.output[:200])
             return result
-        # If -S failed with "a terminal is required", try PTY
-        if "terminal is required" not in result.output:
+        # Fast-fail: if -S failed with "a terminal is required", skip to PTY immediately
+        if _needs_password(result.output):
+            log_debug("INFO", "sudo tier 2: needs terminal/PTY (fast-fail), moving to tier 3")
+        else:
             log_err(cmd, result.returncode, result.output[:200])
             return result
-        log_debug("INFO", "sudo -S failed (terminal required), trying PTY fallback...")
+    except asyncio.TimeoutError:
+        log_debug("INFO", f"sudo tier 2: timed out after {tier_timeout:.0f}s")
     except Exception as exc:
-        log_debug("INFO", f"sudo attempt 2 exception: {exc}")
-        pass
+        log_debug("INFO", f"sudo tier 2 exception: {exc}")
 
     # --- Attempt 3: PTY via os.forkpty() ---
-    log_debug("INFO", "sudo attempt 3: PTY via os.forkpty()")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        log_err(cmd, -1, "sudo cascade: no time remaining after tier 2")
+        return SudoResult(returncode=-1, output="Command timed out (cascade timeout)", password_sent=False)
+
+    tier_timeout = min(_TIER_TIMEOUT, remaining)
+    log_debug("INFO", f"sudo tier 3: PTY via os.forkpty() (timeout={tier_timeout:.0f}s)")
     try:
-        result = await _sudo_with_pty(full_cmd, password, timeout)
+        result = await _sudo_with_pty(full_cmd, password, tier_timeout)
         if result.ok:
             log_ok(cmd, result.returncode, result.output[:200])
         else:
@@ -307,6 +341,9 @@ def _pty_sync(full_cmd: list[str], password: str, timeout: int) -> SudoResult:
         flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
         fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
+        pid_result = 0
+        status = 0
+
         while time.monotonic() < deadline:
             # Check if child exited
             pid_result, status = os.waitpid(pid, os.WNOHANG)
@@ -386,26 +423,29 @@ async def sudo_run(
     cmd: list[str],
     *,
     password: str = "",
-    timeout: int = 60,
+    timeout: int = 30,
 ) -> SudoResult:
     """One-shot sudo command.
 
     Args:
         cmd: Command WITHOUT "sudo" prefix.
         password: sudo password.
-        timeout: Kill after this many seconds.
+        timeout: Kill after this many seconds (max 30s).
     """
     ctx = SudoContext(password)
     return await ctx.sudo_run(cmd, timeout=timeout)
 
 
 async def sudo_write_file(
-    content: str,
-    dest: str,
-    *,
-    password: str = "",
-    timeout: int = 60,
+    content: str, dest: str, *, password: str = "", timeout: int = 30
 ) -> SudoResult:
-    """One-shot write file via sudo."""
+    """One-shot sudo file write.
+
+    Args:
+        content: File content to write.
+        dest: Destination path.
+        password: sudo password.
+        timeout: Kill after this many seconds (max 30s).
+    """
     ctx = SudoContext(password)
     return await ctx.sudo_write_file(content, dest, timeout=timeout)

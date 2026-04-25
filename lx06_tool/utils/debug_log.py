@@ -5,9 +5,11 @@ Global debug/command history log.
 Provides a module-level ``log_debug()`` function that can be called from
 *anywhere* (runner, sudo, modules) without importing Textual widgets.
 
-The actual widget (``DebugLogPanel``) registers itself on mount and
-unregisters on unmount.  If no widget is registered the calls are
-simply discarded – zero overhead when the panel is hidden.
+Supports **multiple sinks** — both the dedicated DebugLogPanel AND any
+screen's RichLog can receive debug messages simultaneously.
+
+Sinks register themselves on mount and unregister on unmount.
+If no sinks are registered the calls are simply buffered – zero overhead.
 
 Log line format::
 
@@ -33,19 +35,66 @@ class DebugSink(Protocol):
     def get_all_text(self) -> str: ...
 
 
+# ─── RichLog Sink Adapter ─────────────────────────────────────────────────────
+
+_TAG_COLORS: dict[str, str] = {
+    "CMD": "cyan",
+    "OK": "green",
+    "ERR": "red",
+    "INFO": "yellow",
+}
+
+
+class RichLogSink:
+    """Adapter that makes a Textual RichLog widget act as a DebugSink.
+
+    Usage in any Screen::
+
+        from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
+
+        class MyScreen(Screen):
+            def on_mount(self):
+                self._debug_sink = RichLogSink(self.query_one(RichLog))
+                register_sink(self._debug_sink)
+
+            def on_unmount(self):
+                unregister_sink(self._debug_sink)
+    """
+
+    def __init__(self, rich_log) -> None:
+        self._log = rich_log
+        self._lines: list[str] = []
+
+    def write_line(self, tag: str, message: str) -> None:
+        """Write a color-coded debug line to the RichLog."""
+        color = _TAG_COLORS.get(tag, "dim")
+        try:
+            self._log.write(f"[{color}]{message}[/]")
+        except Exception:
+            pass  # Widget not ready / compositing
+        # Also store plain text for clipboard copy
+        self._lines.append(message)
+        if len(self._lines) > 500:
+            self._lines.pop(0)
+
+    def get_all_text(self) -> str:
+        """Return all stored lines as plain text."""
+        return "\n".join(self._lines) if self._lines else "(empty log)"
+
+
 # ─── Module-level state ──────────────────────────────────────────────────────
 
 _lock = threading.Lock()
-_sink: Optional[DebugSink] = None
+_sinks: list[DebugSink] = []
 _buffer: list[tuple[str, str, str]] = []  # (timestamp, tag, message)
 _MAX_BUFFER = 500
 
 
 def register_sink(sink: DebugSink) -> None:
-    """Register the active debug-log widget."""
+    """Register a debug-log sink (additive — supports multiple sinks)."""
     with _lock:
-        global _sink
-        _sink = sink
+        if sink not in _sinks:
+            _sinks.append(sink)
         # Flush buffered messages that arrived before the widget mounted
         if _buffer:
             for ts, tag, msg in _buffer:
@@ -56,11 +105,13 @@ def register_sink(sink: DebugSink) -> None:
             _buffer.clear()
 
 
-def unregister_sink() -> None:
-    """Unregister the debug-log widget (on unmount)."""
+def unregister_sink(sink: DebugSink) -> None:
+    """Unregister a specific debug-log sink (on unmount)."""
     with _lock:
-        global _sink
-        _sink = None
+        try:
+            _sinks.remove(sink)
+        except ValueError:
+            pass
 
 
 def log_debug(tag: str, message: str) -> None:
@@ -75,14 +126,12 @@ def log_debug(tag: str, message: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] [{tag}] {message}"
     with _lock:
-        if _sink is not None:
-            try:
-                _sink.write_line(tag, line)
-            except Exception:
-                # Widget not ready / compositing – buffer briefly
-                _buffer.append((ts, tag, message))
-                if len(_buffer) > _MAX_BUFFER:
-                    _buffer.pop(0)
+        if _sinks:
+            for sink in list(_sinks):  # Copy list to avoid mutation during iteration
+                try:
+                    sink.write_line(tag, line)
+                except Exception:
+                    pass
         else:
             _buffer.append((ts, tag, message))
             if len(_buffer) > _MAX_BUFFER:
@@ -121,12 +170,15 @@ def log_exception(message: str, exc: Exception) -> None:
 
 
 def get_all_text() -> str:
-    """Return the full debug log text (for clipboard copy)."""
+    """Return the full debug log text (for clipboard copy).
+
+    Tries the first available sink, then falls back to the buffer.
+    """
     with _lock:
-        if _sink is not None:
+        for sink in _sinks:
             try:
-                return _sink.get_all_text()
+                return sink.get_all_text()
             except Exception:
-                pass
+                continue
         # Fallback: return buffered text
         return "\n".join(f"[{ts}] [{tag}] {msg}" for ts, tag, msg in _buffer)

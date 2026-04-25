@@ -127,7 +127,7 @@ class DebugLogPanel(Widget):
 
     def on_unmount(self) -> None:
         """Unregister the global debug sink."""
-        unregister_sink()
+        unregister_sink(self)
 
     # ── DebugSink protocol ──────────────────────────────────────────────────
 

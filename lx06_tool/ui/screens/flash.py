@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import LX06App, FlashResult
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 from lx06_tool.modules.flasher import (
     detect_active_partition,
     flash_all,
@@ -57,11 +58,17 @@ class FlashScreen(Screen):
             yield Button("Cancel", variant="default", id="cancel-btn", disabled=True)
 
     def on_mount(self) -> None:
-        self.query_one(RichLog).write(
+        log = self.query_one(RichLog)
+        log.write(
             "[bold]Ready to flash custom firmware.[/]\n"
             "Click 'Start Flashing' to begin.\n"
             "\n[dim]Warning: Do not disconnect the device during flashing.[/]"
         )
+        self._debug_sink = RichLogSink(log)
+        register_sink(self._debug_sink)
+
+    def on_unmount(self) -> None:
+        unregister_sink(self._debug_sink)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-btn":
