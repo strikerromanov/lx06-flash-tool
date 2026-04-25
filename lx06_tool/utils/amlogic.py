@@ -73,13 +73,13 @@ class AmlogicTool:
         print(f"Found device: {device.serial}")
     """
 
-    def __init__(self, update_exe_path: Path, runner: AsyncRunner | None = None):
-        self._update_exe = update_exe_path
+    def __init__(self, update_exe_path: Path | str, runner: AsyncRunner | None = None):
+        self._update_exe = Path(update_exe_path)
         self._runner = runner or AsyncRunner(default_timeout=60.0)
 
-        if not update_exe_path.exists():
+        if not self._update_exe.exists():
             raise AmlogicToolError(
-                f"update.exe not found at: {update_exe_path}. "
+                f"update.exe not found at: {self._update_exe}. "
                 f"Run the environment setup to download aml-flash-tool."
             )
 
