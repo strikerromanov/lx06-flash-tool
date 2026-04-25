@@ -95,31 +95,36 @@ lx06
 
 Arch Linux uses externally-managed Python. Use a virtual environment:
 
+**Bash / Zsh:**
 ```bash
 git clone https://github.com/strikerromanov/lx06-flash-tool.git
 cd lx06-flash-tool
-
-# Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate
-
-# Install the tool
 pip install -e .
-
-# Launch the TUI
 lx06
-
-# Or run environment check only
-lx06 --check
-
-# With verbose logging
-lx06 -v
 ```
 
-### One-liner for Arch
+**Fish shell:**
+```fish
+git clone https://github.com/strikerromanov/lx06-flash-tool.git
+cd lx06-flash-tool
+python -m venv venv
+source venv/bin/activate.fish
+pip install -e .
+lx06
+```
 
+### One-liners
+
+**Bash/Zsh:**
 ```bash
 git clone https://github.com/strikerromanov/lx06-flash-tool.git && cd lx06-flash-tool && python -m venv venv && source venv/bin/activate && pip install -e . && lx06
+```
+
+**Fish:**
+```fish
+git clone https://github.com/strikerromanov/lx06-flash-tool.git; and cd lx06-flash-tool; and python -m venv venv; and source venv/bin/activate.fish; and pip install -e .; and lx06
 ```
 
 ## Requirements
