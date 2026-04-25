@@ -70,7 +70,8 @@ class AmlogicTool:
     The binary requires libusb-0.1 (libusb-compat on Arch/CachyOS).
     """
 
-    def __init__(self, update_exe: Path) -> None:
+    def __init__(self, update_exe: Path | str) -> None:
+        update_exe = Path(update_exe)
         if not update_exe.exists():
             raise FileNotFoundError(f"update binary not found: {update_exe}")
         self._exe = update_exe

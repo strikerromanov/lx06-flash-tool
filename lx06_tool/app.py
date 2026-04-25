@@ -307,8 +307,15 @@ class LX06App(App):
         """Get or create the AmlogicTool instance."""
         if self._aml_tool is None:
             aml_path = self._config.update_exe_path
-            if not aml_path or not Path(aml_path).exists():
+            if aml_path:
+                aml_path = Path(aml_path)
+            if not aml_path or not aml_path.exists():
                 aml_path = Path("/usr/local/bin/aml-flash-tool/update")
+            if not aml_path.exists():
+                raise FileNotFoundError(
+                    f"AML tool not found at {aml_path}. "
+                    f"Use Environment Setup to download it first."
+                )
             self._aml_tool = AmlogicTool(update_exe=aml_path)
         return self._aml_tool
 

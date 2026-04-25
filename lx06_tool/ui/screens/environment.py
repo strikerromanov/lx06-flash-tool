@@ -264,9 +264,10 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             aml_dir = tools_dir / "aml-flash-tool"
 
             if not aml_dir.exists():
-                log.write(f"  Cloning {AML_FLASH_TOOL_REPO}...")
-                await AsyncDownloader.clone_git_repo(
-                    AML_FLASH_TOOL_REPO, str(aml_dir)
+                log.write(f"  Cloning {AML_FLASH_TOOL_REPO} (branch=master)...")
+                dl = AsyncDownloader()
+                await dl.clone_git_repo(
+                    AML_FLASH_TOOL_REPO, aml_dir, branch="master"
                 )
                 log.write("  [green]Clone complete.[/]")
             else:
