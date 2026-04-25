@@ -5,6 +5,10 @@ Wrapper around Radxa's `aml-flash-tool` (the binary is named `update` on Linux,
 historically called `update.exe` in the docs — same binary, just no .exe).
 
 All calls are async; the caller is responsible for providing the path.
+
+On Arch/CachyOS the `update` binary may need sudo for direct USB access
+if udev rules haven't been applied yet. The identify() method automatically
+retries with sudo if the initial attempt fails with a permission error.
 """
 
 from __future__ import annotations
@@ -78,13 +82,38 @@ class AmlogicTool:
 
     # ─── Identification ────────────────────────────────────────────────
 
-    async def identify(self, timeout: int = 5) -> AmlogicDeviceInfo:
+    async def identify(
+        self,
+        timeout: int = 5,
+        *,
+        sudo_password: str = "",
+    ) -> AmlogicDeviceInfo:
         """
         Run `update identify` — succeeds only inside the ~2-second
         Amlogic USB bootloader window.
+
+        If the initial run fails with a permission/libusb error, automatically
+        retries with sudo (useful on Arch/CachyOS before udev rules are active).
         """
         result = await run([self._exe, "identify"], timeout=timeout)
         info = parse_identify_output(result.stdout + result.stderr)
+
+        # If identify failed, try with sudo as fallback for USB permissions
+        if not info.identified and sudo_password:
+            try:
+                from lx06_tool.utils.sudo import sudo_run
+                sudo_result = await sudo_run(
+                    [str(self._exe), "identify"],
+                    password=sudo_password,
+                    timeout=timeout,
+                )
+                if sudo_result.ok:
+                    info = parse_identify_output(
+                        sudo_result.stdout + sudo_result.stderr
+                    )
+            except Exception:
+                pass  # sudo failed, return original result
+
         return info
 
     # ─── Bootloader ────────────────────────────────────────────────────

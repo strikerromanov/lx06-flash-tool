@@ -22,21 +22,26 @@ from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sin
 
 logger = logging.getLogger(__name__)
 
-USB_INSTRUCTIONS = """## USB Connection
+USB_INSTRUCTIONS = """## \U0001f50c USB Connection — Burning Mode
 
-### Steps to enter USB Burning Mode:
+### How to enter USB Burning Mode on the LX06:
 
-1. **Power off** the LX06 speaker completely (unplug power)
+1. **Power off** the speaker completely (unplug power cable)
 2. **Disconnect** any USB cable from the speaker
 3. **Open** the speaker case to access the PCB test pads
 4. **Short** the two test pads near the USB port (use tweezers or wire)
-5. **While shorting**, connect USB-A cable from PC to speaker
+5. **While holding the short**, plug USB-A cable from PC to speaker
 6. **Release** the short after 2-3 seconds
-7. The speaker should enter **Amlogic USB Burning Mode** (2-second window)
+7. The tool will automatically detect the device
 
-The tool will automatically detect the device during the handshake window.
+### Detection Strategy:
+- **Phase 1**: Fast kernel-level scan via sysfs (50ms intervals)
+- **Phase 2**: Amlogic `update identify` handshake
 
-\u26a0\ufe0f If detection fails, try again \u2014 timing is critical (2-second window).
+\u26a0\ufe0f The bootloader window is only **~2 seconds** — the tool uses ultra-fast
+polling to catch it. If detection fails, power-cycle and try again.
+
+\U0001f4a1 **Tip**: Enter your sudo password below — needed for USB permissions on CachyOS.
 """
 
 
@@ -81,6 +86,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
     def on_mount(self) -> None:
         log = self.query_one(RichLog)
         log.write("Ready. Enter your sudo password above, then click 'Start USB Scan'.")
+        log.write("[dim]The sudo password enables USB access and udev rule installation.[/]")
         # Register RichLog as a debug sink so all debug messages appear here
         self._debug_sink = RichLogSink(log)
         register_sink(self._debug_sink)
@@ -116,7 +122,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
             self.query_one("#cancel-btn", Button).disabled = True
 
     async def _start_scan(self) -> None:
-        """Start the USB handshake loop."""
+        """Start the two-phase USB handshake loop."""
         self.scanning = True
         self.query_one("#scan-btn", Button).disabled = True
         self.query_one("#cancel-btn", Button).disabled = False
@@ -132,11 +138,22 @@ class USBConnectScreen(CopyLogMixin, Screen):
             pw = app.sudo_password
 
         log.write("[bold blue]Starting USB handshake scan...[/]")
-        log.write("Waiting for device in USB burning mode...")
+
+        # Check if update binary exists
+        try:
+            tool = app.get_aml_tool()
+        except FileNotFoundError as exc:
+            log.write(f"[bold red]Error:[/] {exc}")
+            log.write("[dim]Run the environment setup first to download aml-flash-tool.[/]")
+            self.query_one("#scan-btn", Button).disabled = False
+            self.query_one("#cancel-btn", Button).disabled = True
+            self.scanning = False
+            return
 
         try:
+            # Install udev rules if not present
             if not udev_rules_installed():
-                log.write("[dim]Installing udev rules...[/]")
+                log.write("[dim]Installing udev rules for USB access...[/]")
                 if not pw:
                     log.write("[bold red]Error: Sudo password required to install udev rules.[/]")
                     log.write("[dim]Enter your password above and try again.[/]")
@@ -145,29 +162,61 @@ class USBConnectScreen(CopyLogMixin, Screen):
                     self.scanning = False
                     return
                 await install_udev_rules(sudo_password=pw)
-                log.write("[green]udev rules installed.[/]")
+                log.write("[green]\u2713 udev rules installed (MODE=0666 + uaccess).[/]")
             else:
-                log.write("[dim]udev rules already installed.[/]")
+                log.write("[dim]\u2713 udev rules already installed.[/]")
 
-            # Get AmlogicTool and start handshake
-            tool = app.get_aml_tool()
+            # Track scan state for live display
+            current_phase = "fast"
+            fast_attempts = 0
+            identify_attempts = 0
 
-            def on_attempt(attempt: int, elapsed: int) -> None:
-                if attempt % 10 == 1:  # Log every ~1 second
-                    log.write(f"  [dim]Attempt {attempt} ({elapsed}s elapsed)...[/]")
+            def on_attempt(attempt: int, elapsed: int, phase: str) -> None:
+                nonlocal fast_attempts, identify_attempts
+                if phase == "fast":
+                    fast_attempts = attempt
+                    if attempt % 20 == 1:  # Log every ~1 second (20 × 50ms)
+                        log.write(
+                            f"  [dim]\U0001f50d Phase 1: Scanning sysfs... "
+                            f"attempt {attempt} ({elapsed}s)[/]"
+                        )
+                elif phase == "identify":
+                    identify_attempts += 1
+                    if identify_attempts <= 3 or identify_attempts % 5 == 0:
+                        log.write(
+                            f"  [cyan]\U0001f517 Phase 2: Handshake attempt "
+                            f"{identify_attempts} ({elapsed}s)[/]"
+                        )
 
-            log.write("[bold]Polling for device (120s timeout)...[/]")
+            def on_phase(phase: str) -> None:
+                nonlocal current_phase
+                current_phase = phase
+                if phase == "identify":
+                    log.write(
+                        "[bold green]\u26a1 Device detected on USB! "
+                        "Starting Amlogic handshake...[/]"
+                    )
+                elif phase == "fast":
+                    log.write(
+                        "[yellow]\u21bb Handshake failed — resetting to scan mode[/]"
+                    )
+
+            log.write("[bold]Phase 1: Fast sysfs polling (50ms intervals)...[/]")
+            log.write("[dim]Waiting for device with VID=1b8e PID=c003[/]")
+
             device_info = await handshake_loop(
                 tool,
                 timeout=120,
+                sudo_password=pw,
                 on_attempt=on_attempt,
+                on_phase=on_phase,
             )
 
             # Device detected!
-            log.write("\n[bold green]Device detected![/]")
-            log.write(f"  Chip: {device_info.chip or 'N/A'}")
-            log.write(f"  Serial: {device_info.serial or 'N/A'}")
-            log.write(f"  Firmware: {device_info.firmware_version or 'N/A'}")
+            log.write("\n[bold green]\U0001f389 Device successfully identified![/]")
+            log.write(f"  \U0001f4bb Chip: [bold]{device_info.chip or 'N/A'}[/]")
+            log.write(f"  \U0001f511 Serial: {device_info.serial or 'N/A'}")
+            log.write(f"  \U0001f4e6 Firmware: {device_info.firmware_version or 'N/A'}")
 
             # Create LX06Device and store in app
             device = LX06Device(
@@ -182,9 +231,11 @@ class USBConnectScreen(CopyLogMixin, Screen):
             await app.on_usb_connected(device)
 
         except Exception as exc:
-            if "not identified" in str(exc).lower() or "timeout" in str(exc).lower():
-                log.write(f"\n[yellow]Device not detected within timeout.[/]")
+            exc_str = str(exc).lower()
+            if "not identified" in exc_str or "timeout" in exc_str:
+                log.write(f"\n[yellow]\u26a0 Device not detected within 120s timeout.[/]")
                 log.write("[dim]Power-cycle the speaker and try again.[/]")
+                log.write("[dim]Make sure you hold the test-pad short while plugging in USB.[/]")
             else:
                 log.write(f"\n[bold red]Error:[/] {exc}")
                 logger.error("USB scan failed: %s", exc, exc_info=True)

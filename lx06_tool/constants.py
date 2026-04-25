@@ -20,16 +20,20 @@ AMLOGIC_USB_PRODUCT_ID: Final[str] = "c003"
 # The LX06 uses the Amlogic AXG (A113X) SoC
 LX06_CHIP: Final[str] = "AXG"
 
-# udev rule line — identifies the Amlogic bootloader USB mode
+# udev rule line — identifies the Amlogic bootloader USB mode.
+# Uses MODE="0666" for universal access + TAG+="uaccess" for systemd-udevd
+# (Arch/CachyOS use systemd-udevd which honours uaccess tags).
+# No GROUP="plugdev" — that group only exists on Debian/Ubuntu.
 UDEV_RULE_LINE: Final[str] = (
     'SUBSYSTEM=="usb", '
     f'ATTR{{idVendor}}=="{AMLOGIC_USB_VENDOR_ID}", '
     f'ATTR{{idProduct}}=="{AMLOGIC_USB_PRODUCT_ID}", '
-    'MODE="0666", GROUP="plugdev"'
+    'MODE="0666", TAG+="uaccess"'
 )
 
 # Handshake polling parameters
-HANDSHAKE_POLL_INTERVAL_S: Final[float] = 0.1   # 100 ms
+FAST_POLL_INTERVAL_S: Final[float] = 0.05    # 50 ms — sysfs/lsusb fast poll
+HANDSHAKE_POLL_INTERVAL_S: Final[float] = 0.1   # 100 ms — identify poll
 HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120    # 2 minutes
 
 # ─── Partition Map ────────────────────────────────────────────────────────────
