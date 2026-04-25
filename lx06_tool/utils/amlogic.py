@@ -292,9 +292,21 @@ class AmlogicTool:
             await tool.bulkcmd("printenv partitions")
             await tool.bulkcmd("store list_part")
         """
+        from lx06_tool.utils.validation import sanitize_command_input
+
         log = logging.getLogger(__name__)
-        spaced_cmd = self.BULKCMD_SPACE_PREFIX + cmd
-        log.info("[BULKCMD] Sending: '%s'", cmd)
+
+        # SECURITY: Validate command input to prevent injection
+        try:
+            safe_cmd = sanitize_command_input(cmd)
+        except ValueError as exc:
+            raise UpdateExeError(
+                f"Invalid command input: {exc}",
+                returncode=-1,
+            ) from exc
+
+        spaced_cmd = self.BULKCMD_SPACE_PREFIX + safe_cmd
+        log.info("[BULKCMD] Sending: '%s'", safe_cmd)
 
         full_cmd = [self._exe, "bulkcmd", spaced_cmd]
         result = await run(full_cmd, timeout=timeout)

@@ -399,9 +399,24 @@ async def extract_partition_from_device(
 
     # Validate the dump is actually a squashfs image
     from lx06_tool.utils.squashfs import SquashFSTool
+    from lx06_tool.utils.validation import validate_path_safe
+
     if not SquashFSTool.check_magic_bytes(output_path):
+        # SECURITY: Validate path is within expected directory before reading
+        try:
+            safe_path = validate_path_safe(
+                output_path,
+                output_path.parent.parent,  # Go up two levels to workspace
+                must_exist=True,
+            )
+        except ValueError as exc:
+            raise FirmwareError(
+                f"Path validation failed: {exc}",
+                details="Output path may be outside expected directory.",
+            ) from exc
+
         # Read first 16 bytes for diagnostics
-        with open(output_path, 'rb') as f:
+        with open(safe_path, 'rb') as f:
             header = f.read(16)
         header_hex = header.hex()
         logger.error(
@@ -412,7 +427,7 @@ async def extract_partition_from_device(
             f"Dumped image is not a valid squashfs (magic bytes: {header_hex[:8]}). "
             f"The partition dump may have failed — wrong partition label, wrong size, "
             f"or corrupted NAND. Try re-dumping with correct partition size.",
-            details=f"File: {output_path} ({size} bytes). Expected squashfs magic 'hsqs'.",
+            details=f"File: {safe_path} ({size} bytes). Expected squashfs magic 'hsqs'.",
         )
     logger.info("Partition dump validated as squashfs: %s", output_path)
 

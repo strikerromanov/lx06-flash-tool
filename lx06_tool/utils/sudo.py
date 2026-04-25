@@ -37,6 +37,9 @@ _TIER_TIMEOUT = 10
 # Total cascade timeout across all tiers
 _TOTAL_TIMEOUT = 30
 
+# Password security settings
+_PASSWORD_TIMEOUT = 300  # 5 minutes default
+
 
 @dataclass
 class SudoResult:
@@ -55,22 +58,57 @@ class SudoContext:
 
     Tries multiple approaches to ensure sudo works on all distros:
     1. No password (root / NOPASSWD)  2. sudo -S  3. PTY fallback
+
+    SECURITY: Passwords are automatically cleared after timeout
+    to prevent exposure in memory dumps or core files.
     """
 
-    def __init__(self, password: str = "") -> None:
+    def __init__(self, password: str = "", password_timeout: int = _PASSWORD_TIMEOUT) -> None:
         self._password = password
+        self._password_time: float = time.time() if password else 0
+        self._password_timeout = password_timeout
 
     @property
     def password(self) -> str:
+        """Get password, checking timeout."""
+        if self._is_expired():
+            self._clear_password()
         return self._password
 
     @password.setter
     def password(self, value: str) -> None:
+        """Set password and update timestamp."""
         self._password = value
+        if value:
+            self._password_time = time.time()
 
     @property
     def has_password(self) -> bool:
-        return bool(self._password)
+        """Check if password exists and is not expired."""
+        return bool(self._password) and not self._is_expired()
+
+    def _is_expired(self) -> bool:
+        """Check if password has expired."""
+        if not self._password:
+            return False
+        elapsed = time.time() - self._password_time
+        return elapsed > self._password_timeout
+
+    def clear_password(self) -> None:
+        """Manually clear password from memory."""
+        self._clear_password()
+
+    def _clear_password(self) -> None:
+        """Internal method to securely clear password."""
+        if self._password:
+            # Overwrite memory with null bytes
+            self._password = '\x00' * len(self._password)
+            self._password = ""
+            self._password_time = 0
+
+    def __del__(self):
+        """Ensure password is cleared when object is destroyed."""
+        self._clear_password()
 
     async def sudo_run(
         self,

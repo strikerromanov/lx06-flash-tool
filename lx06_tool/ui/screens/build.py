@@ -226,15 +226,33 @@ class BuildScreen(Screen):
             else:
                 # 1b. No backup — try extracting directly from device
                 log.write("  No backup images found in backup directory.")
+                log.write("")
+                log.write("[bold yellow]⚠ WARNING: Direct device extraction can cause instability[/]")
+                log.write("[yellow]  Device may reboot or disconnect during large partition reads[/]")
+                log.write("[yellow]  Using backup is STRONGLY RECOMMENDED instead[/]")
+                log.write("")
 
                 if app.device is not None:
                     log.write("  Device is connected — attempting direct extraction...")
+                    log.write("  [yellow]This may take several minutes and could fail...[/]")
                     on_step("Extracting firmware directly from device...", 5)
 
-                    system_image, boot_image = await self._extract_from_device(
-                        app, log, build_dir, sudo_password=pw,
-                    )
-                    source_label = f"device (direct extraction)"
+                    try:
+                        system_image, boot_image = await self._extract_from_device(
+                            app, log, build_dir, sudo_password=pw,
+                        )
+                        source_label = f"device (direct extraction)"
+                    except Exception as exc:
+                        log.write("")
+                        log.write("[bold red]✗ Direct extraction failed![/]")
+                        log.write(f"[yellow]Error:[/] {exc}")
+                        log.write("")
+                        log.write("[bold cyan]Recommendation:[/]")
+                        log.write("  1. Go back and run backup first (RECOMMENDED)")
+                        log.write("  2. Ensure device stays in USB bootloader mode")
+                        log.write("  3. Try shorter timeout if operation times out")
+                        self.query_one("#start-btn", Button).disabled = False
+                        return
                 else:
                     # 1c. No backup AND no device — cannot proceed
                     log.write("")
@@ -254,8 +272,24 @@ class BuildScreen(Screen):
             # Validate the system image is a valid squashfs before extraction
             if system_image and system_image.exists():
                 from lx06_tool.utils.squashfs import SquashFSTool
+                from lx06_tool.utils.validation import validate_path_safe
+
                 if not SquashFSTool.check_magic_bytes(system_image):
-                    with open(system_image, 'rb') as f:
+                    # SECURITY: Validate path before reading
+                    try:
+                        safe_path = validate_path_safe(
+                            system_image,
+                            backup_dir,  # Must be within backup directory
+                            must_exist=True,
+                        )
+                    except ValueError as exc:
+                        log.write("")
+                        log.write(f"[bold red]\u2717 Path validation failed:[/]")
+                        log.write(f"  {exc}")
+                        self.query_one("#start-btn", Button).disabled = False
+                        return
+
+                    with open(safe_path, 'rb') as f:
                         header = f.read(16)
                     log.write("")
                     log.write(f"[bold red]\u2717 System image is NOT a valid squashfs![/]")
