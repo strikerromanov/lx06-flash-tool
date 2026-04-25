@@ -52,9 +52,11 @@ class AsyncRunner:
         self,
         default_timeout: float = 60.0,
         sudo: bool = False,
+        sudo_password: str = "",
     ) -> None:
         self._default_timeout = default_timeout
         self._sudo = sudo
+        self._sudo_password = sudo_password
 
     async def run(  # noqa: D401
         self,
@@ -63,14 +65,22 @@ class AsyncRunner:
         timeout: Optional[float] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         sudo: Optional[bool] = None,
+        sudo_password: Optional[str] = None,
         check: bool = False,
     ) -> CommandResult:
         """Execute *cmd* and return a CommandResult."""
         use_sudo = sudo if sudo is not None else self._sudo
+        pw = sudo_password if sudo_password is not None else self._sudo_password
         str_cmd = [str(c) for c in cmd]
         actual_cmd = ["sudo"] + str_cmd if use_sudo else str_cmd
 
         effective_timeout = int(timeout or self._default_timeout)
+
+        # Build stdin_data when sudo -S is needed
+        stdin_data: Optional[str] = None
+        if use_sudo and pw:
+            actual_cmd = ["sudo", "-S"] + str_cmd
+            stdin_data = pw + "\n"
 
         if on_output is not None:
             def _on_stdout(line: str) -> None:
@@ -86,7 +96,11 @@ class AsyncRunner:
                 timeout=effective_timeout,
             )
         else:
-            rr = await run(actual_cmd, timeout=effective_timeout)
+            rr = await run(
+                actual_cmd,
+                timeout=effective_timeout,
+                stdin_data=stdin_data,
+            )
 
         cr = _to_command_result(rr)
 

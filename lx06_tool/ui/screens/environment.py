@@ -86,11 +86,16 @@ class EnvironmentScreen(CopyLogMixin, Screen):
         )
 
     def _get_sudo_password(self) -> str:
-        """Get the sudo password from the input field."""
+        """Get the sudo password from the input field and sync to app."""
         try:
-            return self.query_one("#sudo-input", Input).value.strip()
+            pw = self.query_one("#sudo-input", Input).value.strip()
         except Exception:
-            return ""
+            pw = ""
+        # Sync to app-level SudoContext so other screens can use it
+        app = self.app
+        if isinstance(app, LX06App):
+            app.sudo_password = pw
+        return pw
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "copy-btn":
@@ -220,7 +225,8 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             log.write(f"  Installing: {d.package_name}")
 
         try:
-            await install_dependencies(missing, os_info)
+            password = self._get_sudo_password()
+            await install_dependencies(missing, os_info, sudo_password=password)
             log.write("\n[green]Dependencies installed successfully.[/]")
             self.install_complete = True
 

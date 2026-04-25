@@ -274,6 +274,8 @@ def _dep_notes(logical: str, os_info: OSInfo) -> str:
 async def install_dependencies(
     missing: list[DependencyStatus],
     os_info: OSInfo,
+    *,
+    sudo_password: str = "",
 ) -> None:
     """
     Install all missing packages via the host package manager.
@@ -286,10 +288,10 @@ async def install_dependencies(
     pkg_names = [d.package_name for d in missing]
 
     if os_info.pkg_manager == "apt":
-        await _run_install(["sudo", "apt-get", "update", "-q"])
+        await _run_install(["sudo", "apt-get", "update", "-q"], sudo_password=sudo_password)
 
     cmd = os_info.install_cmd_prefix + pkg_names
-    result = await run(cmd, timeout=300)
+    result = await _sudo_run(cmd, timeout=300, sudo_password=sudo_password)
     if result.returncode != 0:
         raise DependencyInstallError(
             f"Package installation failed (exit {result.returncode}):\n"
@@ -297,12 +299,37 @@ async def install_dependencies(
         )
 
 
-async def _run_install(cmd: list[str], timeout: int = 120) -> None:
-    result = await run(cmd, timeout=timeout)
+async def _run_install(
+    cmd: list[str],
+    *,
+    timeout: int = 120,
+    sudo_password: str = "",
+) -> None:
+    result = await _sudo_run(cmd, timeout=timeout, sudo_password=sudo_password)
     if result.returncode != 0:
         raise DependencyInstallError(
             f"Command {' '.join(cmd)} failed: {result.stderr}"
         )
+
+
+async def _sudo_run(
+    cmd: list[str],
+    *,
+    timeout: int = 60,
+    sudo_password: str = "",
+    stdin_data: Optional[str] = None,
+) -> "RunResult":
+    """Run a sudo command, injecting password via stdin when available.
+
+    When both *sudo_password* and *stdin_data* are provided the
+    password line is prepended to *stdin_data*.
+    """
+    effective_stdin = stdin_data
+    if sudo_password and cmd and cmd[0] == "sudo":
+        cmd = ["sudo", "-S"] + cmd[1:]
+        pw_line = sudo_password + "\n"
+        effective_stdin = pw_line + (stdin_data or "")
+    return await run(cmd, timeout=timeout, stdin_data=effective_stdin)
 
 
 # ─── Docker Readiness ─────────────────────────────────────────────────────────
@@ -349,7 +376,12 @@ async def verify_docker(os_info: OSInfo) -> None:
 
 # ─── udev Rules ───────────────────────────────────────────────────────────────
 
-async def install_udev_rules(rules_content: str, dest: str) -> None:
+async def install_udev_rules(
+    rules_content: str,
+    dest: str,
+    *,
+    sudo_password: str = "",
+) -> None:
     """
     Write the Amlogic USB udev rule and reload the rule set.
 
@@ -358,10 +390,12 @@ async def install_udev_rules(rules_content: str, dest: str) -> None:
     dest_path = Path(dest)
 
     # Write the rules file
-    write_result = await run(
-        ["sudo", "bash", "-c", f"cat > {dest_path}"],
+    write_cmd: list[str] = ["sudo", "bash", "-c", f"cat > {dest_path}"]
+    write_result = await _sudo_run(
+        write_cmd,
         stdin_data=rules_content,
         timeout=10,
+        sudo_password=sudo_password,
     )
     if write_result.returncode != 0:
         from lx06_tool.exceptions import UdevRulesError
@@ -372,7 +406,7 @@ async def install_udev_rules(rules_content: str, dest: str) -> None:
         ["sudo", "udevadm", "control", "--reload-rules"],
         ["sudo", "udevadm", "trigger", "--subsystem-match=usb"],
     ):
-        result = await run(cmd, timeout=15)
+        result = await _sudo_run(cmd, timeout=15, sudo_password=sudo_password)
         if result.returncode != 0:
             from lx06_tool.exceptions import UdevRulesError
             raise UdevRulesError(

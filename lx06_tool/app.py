@@ -41,7 +41,7 @@ from lx06_tool.config import (
 )
 from lx06_tool.state import StateMachine
 from lx06_tool.utils.amlogic import AmlogicTool
-
+from lx06_tool.utils.sudo import SudoContext
 logger = logging.getLogger(__name__)
 
 
@@ -143,7 +143,7 @@ class LX06App(App):
 
         # Module instances (initialized lazily)
         self._aml_tool: AmlogicTool | None = None
-
+        self._sudo_context: SudoContext = SudoContext()
         # Runtime state
         self._device: LX06Device | None = None
         self._choices = CustomizationChoices()
@@ -301,6 +301,20 @@ class LX06App(App):
     def docker_ok(self, value: bool) -> None:
         self._docker_ok = value
 
+    # ── Sudo Context ──────────────────────────────────────────────────────────
+
+    @property
+    def sudo_context(self) -> SudoContext:
+        return self._sudo_context
+
+    @property
+    def sudo_password(self) -> str:
+        return self._sudo_context.password
+
+    @sudo_password.setter
+    def sudo_password(self, value: str) -> None:
+        self._sudo_context.password = value
+
     # ── Module Accessors ──────────────────────────────────────────────────────
 
     def get_aml_tool(self) -> AmlogicTool:
@@ -326,6 +340,7 @@ class LX06App(App):
         This accessor provides a compatibility shim.
         """
         from lx06_tool.modules.firmware import FirmwareOrchestrator, FirmwarePaths
+        from lx06_tool.utils.compat import AsyncRunner
 
         build_dir = self._config.build_dir
         backup_dir = self._config.backup_dir
@@ -338,9 +353,15 @@ class LX06App(App):
             output_system=build_dir / "output" / "root.squashfs",
             output_boot=build_dir / "output" / "boot.img",
         )
+        runner = AsyncRunner(
+            default_timeout=300.0,
+            sudo=True,
+            sudo_password=self._sudo_context.password,
+        )
         return FirmwareOrchestrator(
             paths=paths,
             choices=self._choices,
+            runner=runner,
         )
 
     # ── Global Progress ───────────────────────────────────────────────────────

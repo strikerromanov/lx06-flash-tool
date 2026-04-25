@@ -39,7 +39,11 @@ UDEV_RULE_CONTENT = f"""\
 """
 
 
-async def install_udev_rules(dest: str = UDEV_RULES_DEST) -> None:
+async def install_udev_rules(
+    dest: str = UDEV_RULES_DEST,
+    *,
+    sudo_password: str = "",
+) -> None:
     """
     Write the Amlogic udev rule and reload the rule database.
 
@@ -48,12 +52,20 @@ async def install_udev_rules(dest: str = UDEV_RULES_DEST) -> None:
     """
     dest_path = Path(dest)
 
-    # Write via sudo tee (avoids shell injection)
-    write = await run(
-        ["sudo", "tee", str(dest_path)],
-        stdin_data=UDEV_RULE_CONTENT,
-        timeout=10,
-    )
+    # Build effective command and stdin based on password availability
+    if sudo_password:
+        # Use sudo -S and pipe password + content
+        write = await run(
+            ["sudo", "-S", "tee", str(dest_path)],
+            stdin_data=sudo_password + "\n" + UDEV_RULE_CONTENT,
+            timeout=10,
+        )
+    else:
+        write = await run(
+            ["sudo", "tee", str(dest_path)],
+            stdin_data=UDEV_RULE_CONTENT,
+            timeout=10,
+        )
     if write.returncode != 0:
         raise UdevRulesError(
             f"Failed to write udev rules to {dest_path}:\n{write.stderr}"
@@ -64,7 +76,14 @@ async def install_udev_rules(dest: str = UDEV_RULES_DEST) -> None:
         ["sudo", "udevadm", "control", "--reload-rules"],
         ["sudo", "udevadm", "trigger", "--subsystem-match=usb"],
     ):
-        result = await run(cmd, timeout=15)
+        if sudo_password:
+            result = await run(
+                ["sudo", "-S"] + cmd[1:],
+                stdin_data=sudo_password + "\n",
+                timeout=15,
+            )
+        else:
+            result = await run(cmd, timeout=15)
         if result.returncode != 0:
             raise UdevRulesError(
                 f"udevadm failed: {' '.join(cmd)}\n{result.stderr}"

@@ -83,10 +83,10 @@ class USBConnectScreen(Screen):
         log.write("Waiting for device in USB burning mode...")
 
         try:
-            # Step 1: Install udev rules if not already installed
             if not udev_rules_installed():
                 log.write("[dim]Installing udev rules...[/]")
-                await install_udev_rules()
+                pw = app.sudo_password if isinstance(app, LX06App) else ""
+                await install_udev_rules(sudo_password=pw)
                 log.write("[green]udev rules installed.[/]")
             else:
                 log.write("[dim]udev rules already installed.[/]")
