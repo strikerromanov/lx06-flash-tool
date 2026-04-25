@@ -1,9 +1,12 @@
 #!/bin/bash
 # Dump all NAND partitions for LX06 backup
 #
-# This uses the two-step NAND dump process:
-#   1. store read.part <label> <addr> 0 <size>   (NAND → device RAM)
-#   2. mread mem <addr> normal <size> <file>      (device RAM → host)
+# Uses direct NAND→host transfer:
+#   update mread store <label> normal <file>
+#
+# This avoids the broken two-step RAM approach
+# (store read.part → mread mem) which caused heap corruption
+# at address 0x03000000 on AXG SoCs.
 #
 # Source: Radxa aml-flash-tool aml-flash-tool.sh
 
@@ -11,7 +14,6 @@ set -e
 
 UPDATE="${UPDATE:-update}"
 OUTPUT_DIR="${1:-./backups}"
-ADDR="0x03000000"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -34,21 +36,29 @@ for entry in "${PARTITIONS[@]}"; do
 
     echo "Dumping $label ($size bytes)..."
 
-    # Step 1: Read NAND partition into device RAM
-    $UPDATE bulkcmd "store read.part $label $ADDR 0 $size" || \
-    $UPDATE bulkcmd "store read.part $label $ADDR $size" || \
-    $UPDATE bulkcmd "nand read.part $label $ADDR $size" || {
-        echo "ERROR: Failed to read $label from NAND"
+    # Direct NAND→host transfer (correct approach)
+    $UPDATE mread store "$label" normal "$outfile" || \
+    $UPDATE mread "$label" "$outfile" || \
+    $UPDATE mread store "$label" normal "$size" "$outfile" || {
+        echo "ERROR: Failed to dump $label"
         continue
     }
 
-    # Step 2: Dump device memory to host file
-    $UPDATE mread mem $ADDR normal $size "$outfile" || {
-        echo "ERROR: Failed to dump $label to $outfile"
-        continue
-    }
-
-    echo "  → $outfile ($(stat -c%s "$outfile") bytes)"
+    if [ -f "$outfile" ]; then
+        fsize=$(stat -c%s "$outfile" 2>/dev/null || stat -f%z "$outfile")
+        # Check magic bytes
+        magic=$(xxd -l 4 -p "$outfile" 2>/dev/null | head -1)
+        case "$magic" in
+            68737173) fmt="squashfs (LE)" ;;
+            73716873) fmt="squashfs (BE)" ;;
+            00000000) fmt="EMPTY (zeros)" ;;
+            ffffffff*) fmt="UNREAD (0xFF)" ;;
+            *) fmt="unknown ($magic)" ;;
+        esac
+        echo "  → $outfile ($fsize bytes, $fmt)"
+    else
+        echo "  → ERROR: $outfile not created"
+    fi
 done
 
 echo "All partitions dumped to $OUTPUT_DIR"

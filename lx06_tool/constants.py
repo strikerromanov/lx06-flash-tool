@@ -46,9 +46,21 @@ PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
     "mtd2": {"label": "boot0",      "size": 0x800000},   #  8 MB
     "mtd3": {"label": "boot1",      "size": 0x800000},   #  8 MB
     "mtd4": {"label": "system0",    "size": 0x2000000},  # 32 MB — SquashFS rootfs A
-    "mtd5": {"label": "system1",    "size": 0x2000000},  # 32 MB — SquashFS rootfs B
     "mtd6": {"label": "data",       "size": 0x800000},   #  8 MB
 }
+
+# Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
+# Large squashfs partitions (~32 MB) take 3-5 minutes each over USB bulk.
+PARTITION_TIMEOUTS: Final[dict[str, int]] = {
+    "bootloader": 120,   # 2 min — small (1 MB)
+    "tpl":        60,    # 1 min — small (2 MB)
+    "boot0":      120,   # 2 min — medium (8 MB)
+    "boot1":      120,   # 2 min — medium (8 MB)
+    "system0":    600,   # 10 min — large squashfs (32 MB)
+    "system1":    600,   # 10 min — large squashfs (32 MB)
+    "data":       600,   # 10 min — data partition (8 MB, may be slow)
+}
+DEFAULT_PARTITION_TIMEOUT: Final[int] = 300  # 5 min fallback
 
 # Which partitions form the A/B slot pairs
 AB_BOOT_SLOTS:   Final[tuple[str, str]] = ("boot0",   "boot1")

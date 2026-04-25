@@ -3,18 +3,28 @@ lx06_tool/modules/backup.py
 ----------------------------
 Phase 2: NAND partition dump + checksum verification.
 
-Dumps all 7 LX06 partitions sequentially using the two-step NAND dump
-(store read.part → mread mem), then verifies each dump with SHA-256 + MD5
-before allowing the pipeline to advance to Phase 3.
+Dumps all 7 LX06 partitions sequentially using direct NAND→host
+transfer (update mread store <label> normal <file>), then verifies
+each dump with SHA-256 + MD5 before allowing the pipeline to
+advance to Phase 3.
+
+The old two-step RAM approach (store read.part → mread mem at
+0x03000000) has been removed — it caused heap corruption on AXG.
 """
 from __future__ import annotations
 
 import datetime
+import logging
 from pathlib import Path
 from typing import Callable, Optional
 
 from lx06_tool.config import BackupSet, PartitionBackup
-from lx06_tool.constants import MIN_PARTITION_DUMP_RATIO, PARTITION_MAP
+from lx06_tool.constants import (
+    DEFAULT_PARTITION_TIMEOUT,
+    MIN_PARTITION_DUMP_RATIO,
+    PARTITION_MAP,
+    PARTITION_TIMEOUTS,
+)
 from lx06_tool.exceptions import (
     BackupIncompleteError,
     ChecksumMismatchError,
@@ -22,6 +32,8 @@ from lx06_tool.exceptions import (
 )
 from lx06_tool.utils.amlogic import AmlogicTool
 from lx06_tool.utils.checksum import FileChecksums, hash_file, write_checksum_file
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Partition Dump ───────────────────────────────────────────────────────────
@@ -37,6 +49,9 @@ async def dump_partition(
     """
     Dump a single MTD partition to `output_path`.
 
+    Uses direct NAND→host transfer (update mread store <label> normal <file>).
+    Per-partition timeouts are resolved from PARTITION_TIMEOUTS constants.
+
     Returns a PartitionBackup with size populated (not yet checksummed).
     Raises PartitionDumpError on failure.
     """
@@ -47,12 +62,19 @@ async def dump_partition(
     label         = str(meta["label"])
     expected_size = int(meta["size"])  # type: ignore[arg-type]
 
+    # Resolve per-partition timeout
+    timeout = PARTITION_TIMEOUTS.get(label, DEFAULT_PARTITION_TIMEOUT)
+    logger.info(
+        "[BACKUP] Dumping '%s' (%s) — size=%d, timeout=%ds",
+        mtd_name, label, expected_size, timeout,
+    )
+
     try:
         await tool.mread(
             partition=label,
             output_path=output_path,
             size=expected_size,
-            timeout=180,
+            timeout=timeout,
             on_progress=on_progress,
             sudo_password=sudo_password,
         )
@@ -92,6 +114,11 @@ async def dump_all_partitions(
     """
     Dump all MTD partitions (mtd0 through mtd6) to `backup_dir`.
 
+    Uses direct NAND→host transfer for each partition.
+    Per-partition timeouts are configured in constants.PARTITION_TIMEOUTS.
+    Large partitions (system0/system1) get 10-minute timeouts to
+    accommodate slow USB 2.0 bulk transfers.
+
     Parameters
     ----------
     on_partition_start : Called with (mtd_name, label) at the start of each dump.
@@ -126,8 +153,7 @@ async def dump_all_partitions(
         except (PartitionDumpError, Exception) as exc:
             reason = str(exc)
             # Log the failure but continue with remaining partitions
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Skipping partition %s (%s): %s", mtd_name, label, reason
             )
             if on_partition_skip:
@@ -198,25 +224,3 @@ async def verify_backup(backup_set: BackupSet) -> None:
         part.verified = True
 
     backup_set.all_verified = all(p.verified for p in backup_set.partitions.values())
-
-
-# ─── Backup Report ────────────────────────────────────────────────────────────
-
-def generate_backup_report(backup_set: BackupSet) -> str:
-    """Return a human-readable backup manifest string."""
-    lines = [
-        "═══ LX06 Partition Backup Report ═══",
-        f"Timestamp : {backup_set.timestamp}",
-        f"Directory : {backup_set.backup_dir}",
-        f"Verified  : {'✓ Yes' if backup_set.all_verified else '✗ No'}",
-        "",
-        f"{'MTD':<6} {'Label':<14} {'Size':>10} {'SHA-256 (first 12)':<14}  {'OK'}",
-        "─" * 60,
-    ]
-    for mtd, part in backup_set.partitions.items():
-        size_str  = f"{part.size_bytes:,}"
-        sha_short = part.sha256[:12] if part.sha256 else "—"
-        ok        = "✓" if part.verified else "✗"
-        lines.append(f"{mtd:<6} {part.label:<14} {size_str:>10} {sha_short:<14}  {ok}")
-
-    return "\n".join(lines)

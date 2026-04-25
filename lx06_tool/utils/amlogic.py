@@ -8,20 +8,26 @@ https://github.com/radxa/aml-flash-tool/blob/master/aml-flash-tool.sh
 
 Key commands
 ~~~~~~~~~~~~
-- ``update identify 7``               — detect device in USB burning mode
-- ``update bulkcmd "<uboot_cmd>"``    — send U-Boot command
+- ``update identify [7]``             — detect device in USB burning mode
+- ``update bulkcmd "<uboot_cmd>"``    — send U-Boot command (setenv/saveenv ONLY)
 - ``update partition <name> <file>``  — flash partition by name
-- ``update mread mem <addr> normal <size> <file>`` — dump device RAM to host
-- ``update mwrite <file> mem <addr> normal``        — write host file to device RAM
+- ``update mread store <label> normal <file>`` — direct NAND→host partition dump
+- ``update mwrite <file> mem <addr> normal``   — write host file to device RAM
 
-IMPORTANT: ``mread`` does NOT read partitions directly.  It transfers bytes
-from the device's memory to the host.  To dump a NAND partition, you must:
+IMPORTANT: Partition dumps use DIRECT NAND→host transfer:
 
-  1. ``bulkcmd "store read.part <label> <addr> 0 <size>"``  (NAND → device RAM)
-  2. ``mread mem <addr> normal <size> <file>``              (device RAM → host)
+    update mread store <label> normal <file>
 
-The ``bulkcmd`` arguments are prefixed with 5 spaces, matching the official
-aml-flash-tool.sh ``run_update_return()`` wrapper.
+This transfers partition data directly from NAND to the host file, avoiding
+the broken two-step RAM approach (store read.part → mread mem) which caused
+heap corruption at address 0x03000000 on AXG SoCs.
+
+The ``bulkcmd`` command is reserved ONLY for:
+- ``setenv bootdelay 15`` / ``saveenv`` — bootloader unlock
+- ``store list_part`` / ``store list`` — partition table queries
+- ``printenv`` — environment variable queries
+
+DO NOT use bulkcmd for partition reads — use mread store instead.
 """
 
 from __future__ import annotations
@@ -32,6 +38,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from lx06_tool.constants import (
+    DEFAULT_PARTITION_TIMEOUT,
+    PARTITION_TIMEOUTS,
+    SQUASHFS_MAGIC_BE,
+    SQUASHFS_MAGIC_LE,
+)
 from lx06_tool.exceptions import UpdateExeError
 from lx06_tool.utils.runner import RunResult, run, run_streaming
 
@@ -40,7 +52,7 @@ from lx06_tool.utils.runner import RunResult, run, run_streaming
 
 @dataclass
 class AmlogicDeviceInfo:
-    """Parsed output from `update identify 7`."""
+    """Parsed output from `update identify`."""
     raw: str
     chip: str = ""
     firmware_version: str = ""
@@ -53,7 +65,7 @@ class AmlogicDeviceInfo:
 
 def parse_identify_output(output: str) -> AmlogicDeviceInfo:
     """
-    Parse the output of `update identify 7`.
+    Parse the output of `update identify [7]`.
 
     Example successful output:
         AmlUsbIdentifyHost
@@ -82,25 +94,82 @@ def parse_identify_output(output: str) -> AmlogicDeviceInfo:
     return info
 
 
+# ─── Magic Byte Validation ───────────────────────────────────────────────────
+
+def validate_dump_magic(path: Path, label: str) -> str:
+    """Validate first bytes of a dump file. Returns status string.
+
+    Returns one of:
+        'squashfs_le'  — valid little-endian squashfs (hsqs)
+        'squashfs_be'  — valid big-endian squashfs (sqsh)
+        'empty'        — all zeros (partition may be blank)
+        'unreadable'   — 0xFF padded (unread NAND)
+        'ubi'          — UBI format
+        'gzip'         — gzip compressed
+        'unknown'      — unrecognized format
+    """
+    log = logging.getLogger(__name__)
+    if not path.exists():
+        return "missing"
+
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(32)
+    except OSError as exc:
+        log.warning("[MAGIC] Cannot read %s: %s", path, exc)
+        return "unreadable"
+
+    if len(header) < 4:
+        return "too_small"
+
+    magic4 = header[:4]
+
+    if magic4 == SQUASHFS_MAGIC_LE:
+        log.info("[MAGIC] '%s': valid squashfs (little-endian 'hsqs')", label)
+        return "squashfs_le"
+    if magic4 == SQUASHFS_MAGIC_BE:
+        log.info("[MAGIC] '%s': valid squashfs (big-endian 'sqsh')", label)
+        return "squashfs_be"
+    if magic4 == b'\x00\x00\x00\x00':
+        log.warning("[MAGIC] '%s': all zeros — partition may be empty", label)
+        return "empty"
+    if magic4[:2] == b'\xff\xff':
+        log.warning("[MAGIC] '%s': 0xFF padded — likely unread NAND", label)
+        return "unreadable"
+    if magic4 == b'UBI#':
+        log.warning("[MAGIC] '%s': UBI format — partition uses UBI/UBIFS", label)
+        return "ubi"
+    if header[:2] == b'\x1f\x8b':
+        log.warning("[MAGIC] '%s': gzip compressed", label)
+        return "gzip"
+
+    log.warning(
+        "[MAGIC] '%s': unknown format — first 4 bytes: %s",
+        label, magic4.hex(),
+    )
+    return "unknown"
+
+
 # ─── Amlogic Tool Wrapper ─────────────────────────────────────────────────────
 
 class AmlogicTool:
     """
     Wrapper around the `update` binary from aml-flash-tool.
 
-    Command syntax follows the official Radxa aml-flash-tool.sh:
-    - identify uses argument '7'
-    - bulkcmd arguments are prefixed with 5 spaces
-    - mread dumps device memory (not partitions directly)
-    - partition flashing uses partition names, not mtd indices
-    """
+    Partition dumps use DIRECT NAND→host transfer:
+        update mread store <label> normal <file>
 
-    # Device RAM address used as a work buffer for partition operations.
-    # Must be in a region that U-Boot has initialized (typically 0x03000000).
-    NAND_WORK_ADDR: int = 0x03000000
+    This avoids the broken two-step RAM approach that caused heap corruption
+    on AXG SoCs when cramming 32 MB into address 0x03000000.
+
+    bulkcmd is reserved for setenv/saveenv and partition table queries ONLY.
+    """
 
     # The official aml-flash-tool.sh prepends 5 spaces to bulkcmd arguments.
     BULKCMD_SPACE_PREFIX: str = "     "
+
+    # Chunk size for fallback reads (4 MB)
+    CHUNK_SIZE: int = 4 * 1024 * 1024
 
     def __init__(self, update_exe: Path | str) -> None:
         update_exe = Path(update_exe)
@@ -117,10 +186,12 @@ class AmlogicTool:
         sudo_password: str = "",
     ) -> AmlogicDeviceInfo:
         """
-        Run `update identify 7` — succeeds only when an Amlogic SoC is
+        Run `update identify` — succeeds only when an Amlogic SoC is
         in USB burning (maskrom / WorldCup) mode.
 
-        The '7' argument is required by the official aml-flash-tool.
+        Probes both `identify 7` and `identify` without argument, since
+        some firmware variants reject the numeric argument.
+
         The official script checks for "firmware" (case-insensitive)
         in the output to confirm detection.
 
@@ -129,57 +200,70 @@ class AmlogicTool:
         """
         log = logging.getLogger(__name__)
 
+        # Try with '7' first (official syntax)
         try:
-            # Official syntax: update identify 7
             result = await run([self._exe, "identify", "7"], timeout=timeout)
         except Exception as exc:
-            log.warning("update identify 7 raised exception: %s [%s]", exc, type(exc).__name__)
+            log.warning("update identify 7 raised: %s [%s]", exc, type(exc).__name__)
             exc_lower = str(exc).lower()
             if "cannot execute" in exc_lower or "exec format" in exc_lower:
                 log.error("Binary is wrong architecture for this system")
             elif "not found" in exc_lower:
                 log.error("Binary or shared library missing: %s", exc)
-            return AmlogicDeviceInfo(raw=f"ERROR: {exc}")
+            result = None
 
-        combined = (result.stdout + "\n" + result.stderr).strip()
-        log.debug(
-            "update identify 7 RC=%d stdout=%s stderr=%s",
-            result.returncode,
-            result.stdout[:100] if result.stdout else "<empty>",
-            result.stderr[:100] if result.stderr else "<empty>",
-        )
-
-        info = parse_identify_output(combined)
-
-        if not info.identified:
+        combined = ""
+        if result:
+            combined = (result.stdout + "\n" + result.stderr).strip()
             log.debug(
-                "update identify 7 did not detect device (RC=%d, raw=%s)",
+                "update identify 7 RC=%d stdout=%s stderr=%s",
                 result.returncode,
-                combined[:200] if combined else "<empty>",
+                result.stdout[:100] if result.stdout else "<empty>",
+                result.stderr[:100] if result.stderr else "<empty>",
             )
+
+        info = parse_identify_output(combined) if combined else AmlogicDeviceInfo(raw="")
+
+        # If identify 7 didn't work, try without argument
+        if not info.identified:
+            log.debug("identify 7 failed, trying without argument...")
+            try:
+                result2 = await run([self._exe, "identify"], timeout=timeout)
+                combined2 = (result2.stdout + "\n" + result2.stderr).strip()
+                info2 = parse_identify_output(combined2)
+                if info2.identified:
+                    log.info("Device identified via 'identify' (without '7')")
+                    info = info2
+            except Exception as exc:
+                log.debug("identify (no arg) also failed: %s", exc)
 
         # If identify failed, try with sudo as fallback for USB permissions
         if not info.identified and sudo_password:
-            log.debug("Retrying update identify 7 with sudo...")
-            try:
-                from lx06_tool.utils.sudo import sudo_run
-                sudo_result = await sudo_run(
-                    [str(self._exe), "identify", "7"],
-                    password=sudo_password,
-                    timeout=timeout,
-                )
-                if sudo_result.ok:
-                    log.debug("sudo update identify 7 output: %s", sudo_result.output[:200])
-                    info = parse_identify_output(sudo_result.output)
-                    if info.identified:
-                        log.info("Device identified via sudo fallback")
-                else:
-                    log.debug(
-                        "sudo update identify 7 failed: RC=%s output=%s",
-                        sudo_result.returncode, sudo_result.output[:200],
+            log.debug("Retrying update identify with sudo...")
+            for cmd_args in (["identify", "7"], ["identify"]):
+                try:
+                    from lx06_tool.utils.sudo import sudo_run
+                    sudo_result = await sudo_run(
+                        [str(self._exe)] + cmd_args,
+                        password=sudo_password,
+                        timeout=timeout,
                     )
-            except Exception as exc:
-                log.debug("sudo update identify 7 exception: %s", exc)
+                    if sudo_result.ok:
+                        log.debug("sudo update %s output: %s",
+                                  " ".join(cmd_args), sudo_result.output[:200])
+                        info = parse_identify_output(sudo_result.output)
+                        if info.identified:
+                            log.info("Device identified via sudo fallback (%s)",
+                                     " ".join(cmd_args))
+                            break
+                except Exception as exc:
+                    log.debug("sudo identify retry failed: %s", exc)
+
+        if not info.identified:
+            log.debug("Device not identified after all attempts")
+        else:
+            if not info.raw:
+                info.raw = combined
 
         return info
 
@@ -194,25 +278,27 @@ class AmlogicTool:
     ) -> RunResult:
         """Send a U-Boot command via `update bulkcmd`.
 
+        NOTE: bulkcmd is reserved for setenv/saveenv and partition table
+        queries ONLY. Do NOT use for partition reads — use dump_partition()
+        which uses direct NAND→host transfer.
+
         The official aml-flash-tool.sh prepends 5 spaces to the bulkcmd
-        argument.  This is replicated here for compatibility.
+        argument.
 
         Examples::
 
             await tool.bulkcmd("setenv bootdelay 15")
             await tool.bulkcmd("saveenv")
             await tool.bulkcmd("printenv partitions")
-            await tool.bulkcmd("store read.part boot0 0x03000000 0 0x800000")
+            await tool.bulkcmd("store list_part")
         """
         log = logging.getLogger(__name__)
-        # Official aml-flash-tool.sh prepends 5 spaces to bulkcmd arguments
         spaced_cmd = self.BULKCMD_SPACE_PREFIX + cmd
         log.info("[BULKCMD] Sending: '%s'", cmd)
 
         full_cmd = [self._exe, "bulkcmd", spaced_cmd]
         result = await run(full_cmd, timeout=timeout)
 
-        # Official tool checks for "ERR" in output (even if RC=0)
         combined = (result.stdout + "\n" + result.stderr).strip()
         log.info(
             "[BULKCMD] Result: RC=%d, stdout='%s', stderr='%s'",
@@ -276,41 +362,152 @@ class AmlogicTool:
                     returncode=result.returncode,
                 )
 
-    # ─── Low-level Memory Transfer ─────────────────────────────────────
+    # ─── Partition Dump (Direct NAND→Host) ──────────────────────────────
 
-    async def mread_mem(
+    async def dump_partition(
         self,
-        addr: int,
-        size: int,
+        partition_label: str,
         output_path: Path,
         *,
-        timeout: int = 180,
+        size: int = 0,
+        timeout: int = 0,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
         sudo_password: str = "",
-    ) -> RunResult:
+    ) -> Path:
         """
-        Dump device memory to a host file.
+        Dump a NAND partition directly to a host file.
 
-        Real syntax (from aml-flash-tool.sh help)::
+        Uses direct NAND→host transfer:
+            update mread store <label> normal <file>
 
-            update mread mem 0x03000000 normal 512 emmc.bin
+        This avoids the broken two-step RAM approach (store read.part → mread mem)
+        which caused heap corruption at address 0x03000000 on AXG SoCs.
+
+        Fallback chain:
+          1. mread store <label> normal <file>     — standard syntax
+          2. mread <label> <file>                  — simplified syntax
+          3. mread store <label> normal <size> <file> — with explicit size
+          4. Chunked read via bulkcmd store read.part + mread mem
+             (only if direct reads fail, uses safe high address 0x50000000)
 
         Parameters
         ----------
-        addr : int
-            Device memory address to read from (e.g. 0x03000000).
-        size : int
-            Number of bytes to transfer.
+        partition_label : str
+            Partition name as known to U-Boot (e.g. "bootloader", "system0").
         output_path : Path
-            Host file to write the data into.
+            Host file to write the dump into.
+        size : int
+            Expected partition size in bytes (from PARTITION_MAP).
+            Used for chunked fallback and validation.
+        timeout : int
+            Timeout in seconds. 0 = use per-partition default from constants.
+        on_progress : callable
+            Optional progress callback.
+        sudo_password : str
+            Optional sudo password for USB permission issues.
+
+        Returns
+        -------
+        Path to the dump file.
+
+        Raises
+        ------
+        UpdateExeError
+            If all dump methods fail.
         """
         log = logging.getLogger(__name__)
-        addr_str = f"0x{addr:08X}"
-        log.info("[MREAD] Executing: mread mem %s normal %d %s", addr_str, size, output_path)
 
-        cmd = [self._exe, "mread", "mem", addr_str, "normal", str(size), str(output_path)]
-        log.info("[MREAD] Full command: %s", cmd)
+        # Resolve timeout from per-partition constants if not specified
+        if timeout <= 0:
+            timeout = PARTITION_TIMEOUTS.get(
+                partition_label, DEFAULT_PARTITION_TIMEOUT,
+            )
 
+        log.info(
+            "[DUMP] Starting direct NAND→host dump of '%s' -> %s (timeout=%ds)",
+            partition_label, output_path, timeout,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # ── Attempt 1: Standard mread store syntax ──────────────────────
+        cmd = [str(self._exe), "mread", "store", partition_label, "normal", str(output_path)]
+        log.info("[DUMP] Attempt 1: %s", cmd)
+        result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+
+        if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+            log.info("[DUMP] Attempt 1 SUCCEEDED: %d bytes", output_path.stat().st_size)
+            self._post_validate(output_path, partition_label)
+            return output_path
+
+        log.warning("[DUMP] Attempt 1 failed (RC=%s, exists=%s): %s",
+                    result.returncode if result else "?",
+                    output_path.exists(),
+                    (result.stderr or "")[:200] if result else "no result")
+
+        # ── Attempt 2: Simplified mread syntax ──────────────────────────
+        cmd = [str(self._exe), "mread", partition_label, str(output_path)]
+        log.info("[DUMP] Attempt 2: %s", cmd)
+        result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+
+        if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+            log.info("[DUMP] Attempt 2 SUCCEEDED: %d bytes", output_path.stat().st_size)
+            self._post_validate(output_path, partition_label)
+            return output_path
+
+        log.warning("[DUMP] Attempt 2 failed (RC=%s)",
+                    result.returncode if result else "?")
+
+        # ── Attempt 3: mread with explicit size ─────────────────────────
+        if size > 0:
+            cmd = [str(self._exe), "mread", "store", partition_label,
+                   "normal", str(size), str(output_path)]
+            log.info("[DUMP] Attempt 3 (with size %d): %s", size, cmd)
+            result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+
+            if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+                log.info("[DUMP] Attempt 3 SUCCEEDED: %d bytes", output_path.stat().st_size)
+                self._post_validate(output_path, partition_label)
+                return output_path
+
+            log.warning("[DUMP] Attempt 3 failed (RC=%s)",
+                        result.returncode if result else "?")
+
+        # ── Attempt 4: Chunked fallback via RAM ─────────────────────────
+        # Uses a HIGH safe address (0x50000000) far above U-Boot heap
+        if size > 0:
+            log.warning("[DUMP] Direct reads failed, trying chunked fallback...")
+            try:
+                await self._chunked_dump(
+                    partition_label, size, output_path,
+                    timeout=timeout, on_progress=on_progress,
+                    sudo_password=sudo_password,
+                )
+                if output_path.exists() and output_path.stat().st_size > 0:
+                    log.info("[DUMP] Chunked fallback SUCCEEDED: %d bytes",
+                             output_path.stat().st_size)
+                    self._post_validate(output_path, partition_label)
+                    return output_path
+            except Exception as exc:
+                log.error("[DUMP] Chunked fallback failed: %s", exc)
+
+        # ── All methods failed ──────────────────────────────────────────
+        raise UpdateExeError(
+            f"Failed to dump partition '{partition_label}'. "
+            f"Tried direct NAND→host and chunked fallback. "
+            f"Last error: {(result.stderr or 'unknown')[:300] if result else 'no result'}",
+            returncode=result.returncode if result else -1,
+        )
+
+    async def _run_dump(
+        self,
+        cmd: list[str],
+        timeout: int,
+        on_progress: Optional[callable],    # type: ignore[type-arg]
+        sudo_password: str,
+    ) -> RunResult:
+        """Execute a dump command with sudo fallback."""
+        log = logging.getLogger(__name__)
         try:
             result = await run_streaming(
                 cmd,
@@ -318,241 +515,173 @@ class AmlogicTool:
                 on_stdout=on_progress,
                 on_stderr=on_progress,
             )
-
-            if result.returncode != 0:
-                log.error(
-                    "[MREAD] FAILED: RC=%d, stderr='%s', stdout='%s'",
-                    result.returncode,
-                    result.stderr[:300] if result.stderr else "",
-                    result.stdout[:300] if result.stdout else "",
-                )
-                raise UpdateExeError(
-                    f"mread mem {addr_str} normal {size} failed: {result.stderr}",
-                    returncode=result.returncode,
-                )
-            log.info(
-                "[MREAD] SUCCESS: RC=%d, transferred %d bytes to %s",
-                result.returncode, size, output_path,
-            )
-            return result
+            if result.ok:
+                return result
         except Exception as exc:
+            log.debug("Dump command exception: %s", exc)
             if not sudo_password:
-                raise
+                return RunResult(cmd=cmd, returncode=-1, stdout="", stderr=str(exc))
 
-            # Retry with sudo as fallback for USB permission issues
-            log.debug("Retrying mread mem with sudo...")
+        # Retry with sudo
+        if sudo_password:
             try:
                 from lx06_tool.utils.sudo import sudo_run
                 sudo_result = await sudo_run(
-                    [str(c) for c in cmd],
-                    password=sudo_password,
-                    timeout=timeout,
+                    cmd, password=sudo_password, timeout=timeout,
                 )
                 if sudo_result.ok:
-                    log.debug("mread mem succeeded via sudo fallback")
+                    log.debug("Dump succeeded via sudo fallback")
                     return RunResult(
-                        cmd=[str(c) for c in cmd],
-                        returncode=0,
-                        stdout=sudo_result.output,
-                        stderr="",
+                        cmd=cmd, returncode=0,
+                        stdout=sudo_result.output, stderr="",
                     )
-                else:
-                    raise UpdateExeError(
-                        f"mread mem {addr_str} normal {size} failed (sudo): {sudo_result.output}",
-                        returncode=sudo_result.returncode,
-                    )
-            except UpdateExeError:
-                raise
-            except Exception as sudo_exc:
-                log.debug("sudo mread mem retry failed: %s", sudo_exc)
-                raise exc  # Raise original exception
+                return RunResult(
+                    cmd=cmd, returncode=sudo_result.returncode,
+                    stdout=sudo_result.output, stderr="",
+                )
+            except Exception as exc:
+                log.debug("sudo dump retry failed: %s", exc)
 
-    # ─── Partition Dump (High-Level) ───────────────────────────────────
+        return result  # type: ignore[return-value]
 
-    async def dump_partition(
+    async def _chunked_dump(
         self,
         partition_label: str,
-        size: int,
+        total_size: int,
         output_path: Path,
         *,
-        timeout: int = 180,
+        timeout: int = 600,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
         sudo_password: str = "",
-    ) -> RunResult:
-        """
-        Dump a NAND partition to a host file using the two-step process.
+    ) -> None:
+        """Fallback chunked dump using RAM transfer.
 
-        This is the CORRECT way to dump partitions per the official
-        aml-flash-tool source code:
+        Uses a SAFE high address (0x50000000) well above U-Boot heap.
+        Only used when direct NAND→host transfer fails.
 
-        1. ``bulkcmd "store read.part <label> <addr> 0 <size>"`` — NAND → device RAM
-        2. ``mread mem <addr> normal <size> <file>`` — device RAM → host file
-
-        Falls back to alternative NAND read commands if ``store read.part``
-        is not supported by the device's U-Boot.
-
-        Parameters
-        ----------
-        partition_label : str
-            Partition name as known to U-Boot (e.g. "bootloader", "system0").
-        size : int
-            Expected partition size in bytes (from PARTITION_MAP).
-        output_path : Path
-            Host file to write the dump into.
+        Reads in CHUNK_SIZE (4 MB) chunks:
+          1. bulkcmd "store read.part <label> <addr> <offset> <chunk_size>"
+          2. mread mem <addr> normal <chunk_size> <temp_file>
+          3. Append temp_file to output_path
         """
         log = logging.getLogger(__name__)
-        addr = self.NAND_WORK_ADDR
-        addr_str = f"0x{addr:08X}"
-
-        # Auto-query actual partition size from device
-        log.info("[DUMP] Starting dump of partition '%s' (provided size=%d / 0x%X)",
-                 partition_label, size, size)
-        queried_size = await self.get_partition_size(
-            partition_label, fallback_size=size, sudo_password=sudo_password,
-        )
-        if queried_size != size:
-            log.warning(
-                "[DUMP] Queried partition size (%d / 0x%X) differs from provided size (%d / 0x%X) for '%s'",
-                queried_size, queried_size, size, size, partition_label,
-            )
-            # Use the device-reported size — it knows its own layout better than we do
-            size = queried_size
-        size_hex = f"0x{size:X}"
-        log.info("[DUMP] Final size for '%s': %d bytes (0x%X), addr=%s",
-                 partition_label, size, size, addr_str)
-
-        # Step 1: Read NAND partition into device RAM
-        # Try multiple U-Boot command variants for compatibility
-        read_cmds = [
-            # Modern Amlogic store commands (AXG, G12A, etc.)
-            f"store read.part {partition_label} {addr_str} 0 {size_hex}",
-            # Alternative store syntax without explicit offset
-            f"store read.part {partition_label} {addr_str} {size_hex}",
-            # NAND-specific read command
-            f"nand read.part {partition_label} {addr_str} {size_hex}",
-            # Another common variant
-            f"nand read {addr_str} {partition_label} {size_hex}",
-        ]
-
-        read_ok = False
-        last_error: str = ""
-        successful_cmd: str = ""
-
-        for i, cmd in enumerate(read_cmds):
-            try:
-                log.info("[DUMP] Trying read command [%d/%d]: %s", i + 1, len(read_cmds), cmd)
-                result = await self.bulkcmd(cmd, timeout=30, sudo_password=sudo_password)
-                combined = (result.stdout + "\n" + result.stderr).strip()
-                log.info(
-                    "[DUMP] Read command [%d] result: RC=%d, stdout='%s', stderr='%s'",
-                    i, result.returncode,
-                    result.stdout[:200] if result.stdout else "",
-                    result.stderr[:200] if result.stderr else "",
-                )
-
-                if result.returncode == 0 and "ERR" not in combined.upper():
-                    log.info("[DUMP] Read command [%d] SUCCEEDED: %s", i, cmd)
-                    read_ok = True
-                    successful_cmd = cmd
-                    break
-                else:
-                    last_error = combined[:200]
-                    log.warning(
-                        "[DUMP] Read command [%d] returned error (RC=%d): %s",
-                        i, result.returncode, last_error,
-                    )
-            except Exception as exc:
-                last_error = str(exc)
-                log.warning("[DUMP] Read command [%d] exception: %s", i, exc)
-
-        if not read_ok:
-            raise UpdateExeError(
-                f"Failed to read partition '{partition_label}' into device RAM. "
-                f"Tried {len(read_cmds)} command variants. Last error: {last_error}",
-                returncode=-1,
-            )
+        # Safe RAM address — well above U-Boot heap on AXG
+        safe_addr = 0x50000000
+        addr_str = f"0x{safe_addr:08X}"
+        chunk_size = self.CHUNK_SIZE
+        offset = 0
 
         log.info(
-            "[DUMP] NAND→RAM complete for '%s' using: %s",
-            partition_label, successful_cmd,
+            "[CHUNK] Starting chunked dump of '%s': total=%d, chunk=%d, addr=%s",
+            partition_label, total_size, chunk_size, addr_str,
         )
 
-        # Step 2: Dump device memory to host file
-        if on_progress:
-            on_progress(f"Dumping {partition_label} from device memory...")
-
-        log.info(
-            "[DUMP] RAM→host: mread mem %s normal %d %s",
-            addr_str, size, output_path,
-        )
-        result = await self.mread_mem(
-            addr=addr,
-            size=size,
-            output_path=output_path,
-            timeout=timeout,
-            on_progress=on_progress,
-            sudo_password=sudo_password,
-        )
-
-        # POST-DUMP VALIDATION: Check the dump file immediately
+        # Remove existing output to start fresh
         if output_path.exists():
-            actual_size = output_path.stat().st_size
-            log.info("[DUMP] Output file size: %d bytes (expected %d)", actual_size, size)
+            output_path.unlink()
 
-            # Read and log first 32 bytes for diagnostics
-            with open(output_path, 'rb') as f:
-                header = f.read(32)
-            header_hex = header.hex()
-            log.info("[DUMP] First 32 bytes (hex): %s", header_hex)
+        import tempfile
+        chunk_num = 0
+        while offset < total_size:
+            remaining = total_size - offset
+            this_chunk = min(chunk_size, remaining)
+            chunk_num += 1
+            pct = int(offset / total_size * 100)
 
-            # Check for squashfs magic bytes
-            squashfs_magic = [b'hsqs', b'sqsh']
-            magic_found = None
-            for magic in squashfs_magic:
-                if header[:4] == magic:
-                    magic_found = magic.decode('ascii')
-                    break
+            log.info(
+                "[CHUNK] Reading chunk %d: offset=0x%X, size=%d (%d%%)",
+                chunk_num, offset, this_chunk, pct,
+            )
+            if on_progress:
+                on_progress(f"Chunk {chunk_num}: {pct}% complete...")
 
-            if magic_found:
-                log.info("[DUMP] ✓ Valid squashfs magic detected: '%s'", magic_found)
-            else:
-                log.warning(
-                    "[DUMP] ✗ NO squashfs magic! First 4 bytes: %s (%s). "
-                    "Expected 'hsqs' (68737173) or 'sqsh' (73716873).",
-                    header_hex[:8],
-                    header[:4],
+            # Step 1: Read NAND chunk into device RAM
+            offset_hex = f"0x{offset:X}"
+            size_hex = f"0x{this_chunk:X}"
+            read_cmd = (
+                f"store read.part {partition_label} {addr_str} {offset_hex} {size_hex}"
+            )
+            result = await self.bulkcmd(
+                read_cmd, timeout=60, sudo_password=sudo_password,
+            )
+            if not result.ok:
+                # Try without offset
+                read_cmd2 = (
+                    f"store read.part {partition_label} {addr_str} {size_hex}"
                 )
-                # Try to identify what it actually is
-                try:
-                    if header[:4] == b'\x00\x00\x00\x00':
-                        log.warning("[DUMP] Data appears to be ALL ZEROS — NAND read likely failed silently")
-                    elif header[:2] == b'\xff\xff':
-                        log.warning("[DUMP] Data appears to be 0xFF padded — likely unread NAND")
-                    elif header[:4] == b'UBI#':
-                        log.warning("[DUMP] Data is UBI format, not squashfs — partition may use UBI/UBIFS")
-                    elif header[:2] == b'\x1f\x8b':
-                        log.warning("[DUMP] Data is gzip compressed — unexpected for raw partition dump")
-                except Exception:
-                    pass
+                result = await self.bulkcmd(
+                    read_cmd2, timeout=60, sudo_password=sudo_password,
+                )
+            if not result.ok:
+                raise UpdateExeError(
+                    f"Chunked read failed at offset 0x{offset:X}: {result.stderr}",
+                    returncode=result.returncode,
+                )
 
-            # Also try running `file` command for identification
+            # Step 2: Transfer chunk from device RAM to host temp file
+            with tempfile.NamedTemporaryFile(suffix=".chunk", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
             try:
-                from lx06_tool.utils.runner import run as sync_run
-                file_result = await sync_run(
-                    ["file", str(output_path)], timeout=5,
+                cmd = [
+                    str(self._exe), "mread", "mem", addr_str,
+                    "normal", str(this_chunk), str(tmp_path),
+                ]
+                mresult = await self._run_dump(
+                    cmd, timeout=120, on_progress=None,
+                    sudo_password=sudo_password,
                 )
-                if file_result.stdout:
-                    log.info("[DUMP] file command: %s", file_result.stdout.strip())
-            except Exception:
-                pass
-        else:
-            log.error("[DUMP] Output file was NOT created: %s", output_path)
+                if not mresult.ok:
+                    raise UpdateExeError(
+                        f"Chunked mread failed at offset 0x{offset:X}: {mresult.stderr}",
+                        returncode=mresult.returncode,
+                    )
+
+                # Step 3: Append chunk to output
+                with open(tmp_path, 'rb') as src, open(output_path, 'ab') as dst:
+                    dst.write(src.read())
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+            offset += this_chunk
 
         log.info(
-            "[DUMP] Partition '%s' dump complete: %d bytes -> %s",
-            partition_label, size, output_path,
+            "[CHUNK] Completed: %d chunks, %d bytes total",
+            chunk_num, output_path.stat().st_size if output_path.exists() else 0,
         )
-        return result
+
+    async def _post_validate(self, output_path: Path, label: str) -> None:
+        """Validate dump file after successful transfer."""
+        log = logging.getLogger(__name__)
+        if not output_path.exists():
+            log.error("[VALIDATE] Output file missing: %s", output_path)
+            return
+
+        actual_size = output_path.stat().st_size
+        log.info("[VALIDATE] Dump file size: %d bytes", actual_size)
+
+        # Magic byte validation
+        magic_status = validate_dump_magic(output_path, label)
+        if magic_status in ("squashfs_le", "squashfs_be"):
+            log.info("[VALIDATE] ✓ Valid squashfs for '%s'", label)
+        elif magic_status == "empty":
+            log.warning("[VALIDATE] Empty/zero partition '%s'", label)
+        elif magic_status == "missing":
+            log.error("[VALIDATE] Dump file disappeared for '%s'", label)
+        else:
+            log.warning("[VALIDATE] Unexpected format '%s' for partition '%s'",
+                        magic_status, label)
+
+        # Also run `file` command for extra identification
+        try:
+            file_result = await run(
+                ["file", str(output_path)], timeout=5,
+            )
+            if file_result and file_result.stdout:
+                log.info("[VALIDATE] file: %s", file_result.stdout.strip())
+        except Exception:
+            pass  # Non-critical
+
+    # ─── High-Level mread Wrapper ───────────────────────────────────────
 
     async def mread(
         self,
@@ -560,15 +689,15 @@ class AmlogicTool:
         output_path: Path,
         *,
         size: int = 0,
-        timeout: int = 180,
+        timeout: int = 0,
         on_progress: Optional[callable] = None,    # type: ignore[type-arg]
         sudo_password: str = "",
-    ) -> RunResult:
+    ) -> Path:
         """
         Dump a partition to a host file.
 
         High-level wrapper that resolves the partition label and size,
-        then delegates to dump_partition() for the two-step NAND dump.
+        then delegates to dump_partition() for direct NAND→host transfer.
 
         Parameters
         ----------
@@ -578,6 +707,8 @@ class AmlogicTool:
             Host file for the dump.
         size : int
             Expected size in bytes.  If 0, looked up from PARTITION_MAP.
+        timeout : int
+            Timeout in seconds.  0 = use per-partition default.
         """
         log = logging.getLogger(__name__)
         label = partition
@@ -597,11 +728,16 @@ class AmlogicTool:
                     returncode=-1,
                 )
 
-        log.info("[MREAD] Resolved: partition='%s' label='%s' size=%d (0x%X)", partition, label, size, size)
+        # Resolve timeout from per-partition constants
+        if timeout <= 0:
+            timeout = PARTITION_TIMEOUTS.get(label, DEFAULT_PARTITION_TIMEOUT)
+
+        log.info("[MREAD] Resolved: partition='%s' label='%s' size=%d (0x%X) timeout=%ds",
+                 partition, label, size, size, timeout)
         return await self.dump_partition(
             partition_label=label,
-            size=size,
             output_path=output_path,
+            size=size,
             timeout=timeout,
             on_progress=on_progress,
             sudo_password=sudo_password,
@@ -616,11 +752,7 @@ class AmlogicTool:
     ) -> dict[str, str]:
         """Run diagnostic checks to verify dump connectivity.
 
-        Tests the two-step NAND dump process with a small read to verify:
-        1. Device is responsive to bulkcmd
-        2. Partition table can be queried
-        3. store read.part command works
-        4. mread can transfer data from device RAM to host
+        Tests the direct NAND→host transfer path with a small read.
 
         Returns dict with diagnostic results.
         """
@@ -666,44 +798,36 @@ class AmlogicTool:
         except Exception as exc:
             results["printenv_partitions"] = f"FAIL: {exc}"
 
-        # Test 5: Small NAND read test (bootloader = 1MB = smallest partition)
-        log.info("[DIAG] Test 5: Small NAND read test (bootloader, 512 bytes)")
+        # Test 5: Direct NAND→host read test (bootloader = smallest partition)
+        log.info("[DIAG] Test 5: Direct mread store bootloader")
         try:
-            addr_str = f"0x{self.NAND_WORK_ADDR:08X}"
-            # Try reading just 512 bytes from bootloader
-            result = await self.bulkcmd(
-                f"store read.part bootloader {addr_str} 0 0x200",
-                timeout=10,
-                sudo_password=sudo_password,
-            )
-            results["nand_read_bl"] = f"RC={result.returncode} out={result.stdout[:200]}"
-            log.info("[DIAG] NAND read bootloader: %s", results["nand_read_bl"])
-
-            # Try dumping those 512 bytes to a temp file
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
                 tmp_path = Path(tmp.name)
             try:
-                mread_result = await self.mread_mem(
-                    addr=self.NAND_WORK_ADDR,
-                    size=512,
+                # Try direct NAND→host read of bootloader
+                result_path = await self.dump_partition(
+                    partition_label="bootloader",
                     output_path=tmp_path,
-                    timeout=30,
+                    size=0x100000,  # 1 MB
+                    timeout=60,
                     sudo_password=sudo_password,
                 )
                 if tmp_path.exists():
-                    data = tmp_path.read_bytes()
-                    results["small_dump"] = (
-                        f"size={len(data)} bytes, "
+                    data = tmp_path.read_bytes()[:64]
+                    magic_status = validate_dump_magic(tmp_path, "bootloader")
+                    results["direct_read"] = (
+                        f"size={tmp_path.stat().st_size} bytes, "
+                        f"magic={magic_status}, "
                         f"first_16_hex={data[:16].hex()}"
                     )
-                    log.info("[DIAG] Small dump: %s", results["small_dump"])
+                    log.info("[DIAG] Direct read: %s", results["direct_read"])
                 else:
-                    results["small_dump"] = "FAIL: temp file not created"
+                    results["direct_read"] = "FAIL: temp file not created"
             finally:
                 tmp_path.unlink(missing_ok=True)
         except Exception as exc:
-            results["nand_read_test"] = f"FAIL: {exc}"
-            log.error("[DIAG] NAND read test failed: %s", exc)
+            results["direct_read"] = f"FAIL: {exc}"
+            log.error("[DIAG] Direct read test failed: %s", exc)
 
         log.info("[DIAG] All diagnostics complete: %s", list(results.keys()))
         return results
@@ -718,11 +842,6 @@ class AmlogicTool:
     ) -> str:
         """
         Query the device for partition information.
-
-        The official aml-flash-tool does NOT query the device for partition
-        layout — it reads partition info from the image configuration file.
-        However, we can query U-Boot environment variables for the partition
-        table string.
 
         Tries:
           - ``bulkcmd "printenv partitions"``
@@ -774,19 +893,13 @@ class AmlogicTool:
         """
         Query the device for actual partition names and sizes.
 
-        Tries multiple U-Boot commands to discover the partition layout:
-        - ``store list_part`` — lists partitions with sizes
-        - ``store list`` — store information
-        - ``printenv partitions`` — partition environment variable
-
         Returns:
             Dict mapping partition label -> {"size": int, "offset": int, "type": str}
-            Sizes/offsets may be 0 if parsing failed.
         """
         log = logging.getLogger(__name__)
         partitions: dict[str, dict[str, int | str]] = {}
 
-        # Try store list_part first — best source for partition sizes
+        # Try store list_part first
         try:
             result = await self.bulkcmd(
                 "store list_part", timeout=timeout, sudo_password=sudo_password,
@@ -795,9 +908,6 @@ class AmlogicTool:
                 log.debug("store list_part output:\n%s", result.stdout)
                 for line in result.stdout.splitlines():
                     line = line.strip()
-                    # Parse lines like: system0: size=0x2000000, offset=0x0, type=data
-                    # or: system0 0x2000000 0x0
-                    import re
                     m = re.match(
                         r'(\w+)\s*[:\s]\s*size\s*=\s*(0x[0-9a-fA-F]+)',
                         line,
@@ -810,7 +920,6 @@ class AmlogicTool:
                             "type": "data",
                         }
                         continue
-                    # Try alternate format: label size_hex offset_hex
                     parts = line.split()
                     if len(parts) >= 2 and parts[0].isalnum():
                         try:
@@ -835,8 +944,6 @@ class AmlogicTool:
                 "store list", timeout=timeout, sudo_password=sudo_password,
             )
             if result.returncode == 0:
-                log.debug("store list output:\n%s", result.stdout)
-                import re
                 for line in result.stdout.splitlines():
                     line = line.strip()
                     m = re.match(r'(\w+)\s*[:\s]\s*(0x[0-9a-fA-F]+)', line)
@@ -851,7 +958,6 @@ class AmlogicTool:
                         except ValueError:
                             pass
                 if partitions:
-                    log.debug("Parsed %d partitions from store list", len(partitions))
                     return partitions
         except Exception as exc:
             log.debug("store list failed: %s", exc)
@@ -862,9 +968,6 @@ class AmlogicTool:
                 "printenv partitions", timeout=timeout, sudo_password=sudo_password,
             )
             if result.returncode == 0:
-                log.debug("printenv partitions output:\n%s", result.stdout)
-                # Parse partition env variable — usually comma or space separated labels
-                import re
                 labels = re.split(r'[,\s]+', result.stdout.strip())
                 for label in labels:
                     label = label.strip()
@@ -988,8 +1091,6 @@ class AmlogicTool:
         Flash an image to a partition (convenience wrapper).
 
         Delegates to ``partition()`` with the default type "normal".
-        The old ``mwrite store`` syntax was incorrect; the official tool
-        uses ``partition`` for flashing.
         """
         return await self.partition(
             partition_name=partition,

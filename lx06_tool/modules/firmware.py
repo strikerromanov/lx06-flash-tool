@@ -314,18 +314,6 @@ class FirmwareOrchestrator:
                     except OSError:
                         pass
         return total
-    @staticmethod
-    def _dir_size(path: Path) -> int:
-        """Calculate total size of a directory tree."""
-        total = 0
-        if path.exists():
-            for p in path.rglob("*"):
-                if p.is_file():
-                    try:
-                        total += p.stat().st_size
-                    except OSError:
-                        pass
-        return total
 
     @staticmethod
     def determine_target_slot(active_slot: str) -> tuple[str, str, str]:
@@ -389,7 +377,6 @@ async def extract_partition_from_device(
         await tool.mread(
             partition=partition_label,
             output_path=output_path,
-            timeout=180,
             on_progress=on_progress,
             sudo_password=sudo_password,
         )
