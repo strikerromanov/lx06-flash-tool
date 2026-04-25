@@ -29,7 +29,6 @@ from lx06_tool.exceptions import (
     FlashVerificationError,
 )
 from lx06_tool.utils.amlogic import AmlogicTool
-from lx06_tool.utils.runner import run
 
 
 # ─── A/B Partition Detection ─────────────────────────────────────────────────
@@ -49,11 +48,8 @@ async def detect_active_partition(
     If U-boot query fails, defaults to system0/boot0 as active (safest guess
     for stock firmware — the user can override on the confirmation screen).
     """
-    # Try to read U-boot env
-    result = await run(
-        [str(tool._exe), "bulkcmd", "printenv boot_part"],
-        timeout=10,
-    )
+    # Try to read U-boot env via AmlogicTool (uses correct 5-space prefix)
+    result = await tool.bulkcmd("printenv boot_part", timeout=10)
 
     active_boot = "boot0"  # safe default
 

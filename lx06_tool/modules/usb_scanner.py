@@ -705,10 +705,10 @@ async def test_usb_detection(
                     "sudo pacman -S libusb-compat lib32-libusb-compat"
                 )
 
-        # Try `update identify` — the actual command used for handshake
+        # Try `update identify 7` — the official handshake command
         try:
             identify_result = await async_run(
-                [str(exe), "identify"], timeout=5,
+                [str(exe), "identify", "7"], timeout=5,
             )
             id_output = (identify_result.stdout + "\n" + identify_result.stderr).strip()
             rc = identify_result.returncode

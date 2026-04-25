@@ -36,6 +36,11 @@ class RunResult:
     def ok(self) -> bool:
         return self.returncode == 0 and not self.timed_out
 
+    @property
+    def combined_output(self) -> str:
+        """Combined stdout + stderr, similar to subprocess.run(capture_output=True)."""
+        return (self.stdout + "\n" + self.stderr).strip()
+
     def raise_on_error(self, context: str = "") -> None:
         """Raise RuntimeError with a helpful message if the command failed."""
         if not self.ok:
@@ -45,7 +50,6 @@ class RunResult:
             raise RuntimeError(
                 f"{prefix}Command failed ({reason}): {' '.join(self.cmd)}\n{detail}"
             )
-
 
 # ─── Core Runner ──────────────────────────────────────────────────────────────
 

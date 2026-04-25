@@ -1,13 +1,12 @@
 """
 lx06_tool/modules/backup.py
 ----------------------------
-Phase 2: MTD partition dump + checksum verification.
+Phase 2: NAND partition dump + checksum verification.
 
-Dumps all 7 LX06 partitions sequentially using `update mread`, then
-verifies each dump with SHA-256 + MD5 before allowing the pipeline to
-advance to Phase 3.
+Dumps all 7 LX06 partitions sequentially using the two-step NAND dump
+(store read.part → mread mem), then verifies each dump with SHA-256 + MD5
+before allowing the pipeline to advance to Phase 3.
 """
-
 from __future__ import annotations
 
 import datetime
@@ -51,6 +50,7 @@ async def dump_partition(
         await tool.mread(
             partition=label,
             output_path=output_path,
+            size=expected_size,
             timeout=180,
             on_progress=on_progress,
         )
