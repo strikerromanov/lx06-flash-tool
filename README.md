@@ -82,10 +82,26 @@ lx06_tool/
 
 ## Installation
 
+### Quick Install (Ubuntu/Debian/Fedora)
+
 ```bash
-# Clone the repository
 git clone https://github.com/strikerromanov/lx06-flash-tool.git
 cd lx06-flash-tool
+pip install -e .
+lx06
+```
+
+### Arch Linux (and other PEP 668 systems)
+
+Arch Linux uses externally-managed Python. Use a virtual environment:
+
+```bash
+git clone https://github.com/strikerromanov/lx06-flash-tool.git
+cd lx06-flash-tool
+
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate
 
 # Install the tool
 pip install -e .
@@ -98,6 +114,12 @@ lx06 --check
 
 # With verbose logging
 lx06 -v
+```
+
+### One-liner for Arch
+
+```bash
+git clone https://github.com/strikerromanov/lx06-flash-tool.git && cd lx06-flash-tool && python -m venv venv && source venv/bin/activate && pip install -e . && lx06
 ```
 
 ## Requirements
