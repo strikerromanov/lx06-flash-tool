@@ -13,6 +13,7 @@ retries with sudo if the initial attempt fails with a permission error.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,11 +96,40 @@ class AmlogicTool:
         If the initial run fails with a permission/libusb error, automatically
         retries with sudo (useful on Arch/CachyOS before udev rules are active).
         """
-        result = await run([self._exe, "identify"], timeout=timeout)
-        info = parse_identify_output(result.stdout + result.stderr)
+        log = logging.getLogger(__name__)
+
+        try:
+            result = await run([self._exe, "identify"], timeout=timeout)
+        except Exception as exc:
+            log.warning("update identify raised exception: %s [%s]", exc, type(exc).__name__)
+            # Could be a timeout, missing binary, or library error
+            exc_lower = str(exc).lower()
+            if "cannot execute" in exc_lower or "exec format" in exc_lower:
+                log.error("Binary is wrong architecture for this system")
+            elif "not found" in exc_lower:
+                log.error("Binary or shared library missing: %s", exc)
+            return AmlogicDeviceInfo(raw=f"ERROR: {exc}")
+
+        combined = (result.stdout + "\n" + result.stderr).strip()
+        log.debug(
+            "update identify RC=%d stdout=%s stderr=%s",
+            result.returncode,
+            result.stdout[:100] if result.stdout else "<empty>",
+            result.stderr[:100] if result.stderr else "<empty>",
+        )
+
+        info = parse_identify_output(combined)
+
+        if not info.identified:
+            log.debug(
+                "update identify did not detect device (RC=%d, raw=%s)",
+                result.returncode,
+                combined[:200] if combined else "<empty>",
+            )
 
         # If identify failed, try with sudo as fallback for USB permissions
         if not info.identified and sudo_password:
+            log.debug("Retrying update identify with sudo...")
             try:
                 from lx06_tool.utils.sudo import sudo_run
                 sudo_result = await sudo_run(
@@ -108,11 +138,17 @@ class AmlogicTool:
                     timeout=timeout,
                 )
                 if sudo_result.ok:
-                    info = parse_identify_output(
-                        sudo_result.output
+                    log.debug("sudo update identify output: %s", sudo_result.output[:200])
+                    info = parse_identify_output(sudo_result.output)
+                    if info.identified:
+                        log.info("Device identified via sudo fallback")
+                else:
+                    log.debug(
+                        "sudo update identify failed: RC=%s output=%s",
+                        sudo_result.returncode, sudo_result.output[:200],
                     )
-            except Exception:
-                pass  # sudo failed, return original result
+            except Exception as exc:
+                log.debug("sudo update identify exception: %s", exc)
 
         return info
 

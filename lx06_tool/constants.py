@@ -78,6 +78,24 @@ OLD_UDEV_RULES: Final[list[str]] = [
     "/etc/udev/rules.d/99-amlogic.rules",
     "/lib/udev/rules.d/70-persistent-usb-ubuntu14.rules",
     "/usr/lib/udev/rules.d/70-persistent-usb-ubuntu14.rules",
+    "/etc/udev/rules.d/99-amlogic-usb.rules",
+    "/lib/udev/rules.d/99-amlogic-usb.rules",
+]
+
+# Directories to search for old Amlogic udev rules via glob
+UDEV_GLOB_DIRS: Final[list[str]] = [
+    "/etc/udev/rules.d",
+    "/lib/udev/rules.d",
+    "/usr/lib/udev/rules.d",
+    "/run/udev/rules.d",
+]
+
+# Filename patterns that indicate old/conflicting Amlogic udev rules
+UDEV_GLOB_PATTERNS: Final[list[str]] = [
+    "*amlogic*",
+    "*1b8e*",
+    "*aml*usb*",
+    "*persistent-usb*",
 ]
 
 # ─── Paths & Directories ─────────────────────────────────────────────────────

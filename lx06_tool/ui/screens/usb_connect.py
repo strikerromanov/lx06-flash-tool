@@ -170,6 +170,14 @@ class USBConnectScreen(CopyLogMixin, Screen):
             f"update binary found"
             + (f" ({diag['update_exe_path']})" if diag['update_exe_path'] else "")
         )
+        if diag['update_exe_found']:
+            arch = diag.get('update_exe_arch', '')
+            if arch:
+                arch_color = "green" if arch == "64-bit" else "yellow"
+                log.write(f"    Architecture: [{arch_color}]{arch}[/]")
+            file_detail = diag.get('update_exe_file_detail', '')
+            if file_detail:
+                log.write(f"    [dim]{file_detail}[/]")
         log.write(
             f"  {_status_icon(diag['update_exe_executable'])} "
             f"update binary is executable"
@@ -188,17 +196,90 @@ class USBConnectScreen(CopyLogMixin, Screen):
             f"Device currently visible (USB)"
         )
 
+        # ── All USB devices listing ────────────────────────────────────────
+        all_lsusb = diag.get('all_usb_devices_lsusb', '')
+        if all_lsusb:
+            log.write(f"\n[bold]All USB Devices (lsusb):[/]")
+            for line in all_lsusb.splitlines():
+                log.write(f"  [dim]{line}[/]")
+
+        # Check for any devices with Amlogic VID
+        aml_devices = diag.get('amlogic_vid_devices', '')
+        if aml_devices:
+            log.write(f"\n[bold green]Amlogic VID (1b8e) devices found:[/]")
+            for line in aml_devices.splitlines():
+                log.write(f"  [green]{line}[/]")
+        elif all_lsusb:
+            log.write(f"  [dim]No devices with VID 1b8e found.[/]")
+
+        # sysfs device listing for additional debug
+        sysfs_devs = diag.get('all_usb_devices_sysfs', [])
+        if sysfs_devs:
+            log.write(f"\n[bold]USB Devices (sysfs):[/]")
+            for dev in sysfs_devs:
+                vid = dev.get('idVendor', '?')
+                pid = dev.get('idProduct', '?')
+                name = dev.get('product', '')
+                vid_color = "green" if vid.lower() == "1b8e" else "dim"
+                log.write(f"  [{vid_color}]{vid}:{pid} {name}[/]")
+
+        # ── Binary architecture and library details ────────────────────────
+        if diag.get('update_exe_ldd'):
+            log.write(f"\n[bold]Binary Dependencies (ldd):[/]")
+            ldd_output = diag['update_exe_ldd']
+            for line in ldd_output.splitlines():
+                if 'not found' in line:
+                    log.write(f"  [bold red]{line.strip()}[/]")
+                else:
+                    log.write(f"  [dim]{line.strip()}[/]")
+
         # ── Binary test output ────────────────────────────────────────────
         if diag['update_exe_test_output']:
             log.write(f"\n[bold]Binary Test:[/]")
             log.write(f"  [dim]{diag['update_exe_test_output']}[/]")
 
-        # ── Old rules warning ─────────────────────────────────────────────
+        # ── update identify output ─────────────────────────────────────────
+        identify_output = diag.get('update_identify_output', '')
+        if identify_output:
+            log.write(f"\n[bold]update identify test:[/]")
+            log.write(f"  [dim]{identify_output}[/]")
+
+        # ── Old rules warning with contents and cleanup results ────────────
         if diag['old_rules_found']:
             log.write(f"\n[yellow]\u26a0 Old conflicting udev rules found:[/]")
             for rule in diag['old_rules_found']:
+                content = diag.get('old_rules_contents', {}).get(rule, '')
                 log.write(f"  [yellow]\u274c {rule}[/]")
-            log.write("  [dim]These will be cleaned up when you click 'Start USB Scan'.[/]")
+                if content:
+                    for cl in content.splitlines()[:3]:
+                        log.write(f"    [dim]{cl[:80]}[/]")
+
+            # Show cleanup results
+            cleanup_results = diag.get('old_rules_cleanup_results', [])
+            if cleanup_results:
+                log.write(f"\n  [bold]Cleanup results:[/]")
+                for cr in cleanup_results:
+                    status = cr.get('status', '?')
+                    path = cr.get('path', '?')
+                    detail = cr.get('detail', '')
+                    if status == 'removed':
+                        log.write(f"    [green]\u2713 Removed: {path}[/]")
+                    elif status == 'already_gone':
+                        log.write(f"    [dim]- Already gone: {path}[/]")
+                    else:
+                        log.write(f"    [red]\u274c {status}: {path} ({detail})[/]")
+
+                # Re-check
+                remaining = [
+                    cr['path'] for cr in cleanup_results
+                    if cr['status'] not in ('removed', 'already_gone')
+                ]
+                if remaining:
+                    log.write(
+                        f"  [red]\u26a0 These rules still exist and may need manual removal.[/]"
+                    )
+                else:
+                    log.write(f"  [green]All old rules cleaned up successfully.[/]")
 
         # ── udev rules content ────────────────────────────────────────────
         if diag['udev_rules_content']:
@@ -212,6 +293,13 @@ class USBConnectScreen(CopyLogMixin, Screen):
             for issue in diag['issues']:
                 log.write(f"  \u274c {issue}")
 
+        # ── Actionable advice ─────────────────────────────────────────────
+        advice = diag.get('advice', [])
+        if advice:
+            log.write(f"\n[bold cyan]\U0001f4a1 Suggested fixes:[/]")
+            for tip in advice:
+                log.write(f"  [cyan]• {tip}")
+
         # ── Overall status ────────────────────────────────────────────────
         if diag['ready_to_scan']:
             log.write(
@@ -224,7 +312,6 @@ class USBConnectScreen(CopyLogMixin, Screen):
             log.write(
                 "[dim]Fix the issues above, then try 'Start USB Scan'.[/]"
             )
-
     # ─── USB Scan ───────────────────────────────────────────────────────────
 
     async def _start_scan(self) -> None:
@@ -257,7 +344,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
         # Show critical issues
         critical_issues = [
             i for i in diag['issues']
-            if 'Old conflicting' not in i
+            if 'Old conflicting' not in i and 'STILL present' not in i
         ]
         if critical_issues:
             log.write("[bold red]Pre-flight check failed:[/]")
