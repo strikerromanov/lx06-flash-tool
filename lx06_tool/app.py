@@ -150,6 +150,7 @@ class LX06App(App):
         self._choices = CustomizationChoices()
         self._flash_result: FlashResult | None = None
         self._backup_skipped: bool = False
+        self._sudo_context = SudoContext()
 
         # Environment state (populated by environment screen)
         self._os_info: Any | None = None  # OSInfo from detect_os()
