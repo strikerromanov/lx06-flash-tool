@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from lx06_tool.utils.sudo import sudo_run, sudo_write_file
+from lx06_tool.constants import DISTRO_PACKAGES, OS_FAMILY_MAP, OS_LIKE_MAP
 from lx06_tool.exceptions import (
     DependencyInstallError,
     DependencyMissingError,
@@ -285,51 +285,28 @@ async def install_dependencies(
     if not missing:
         return
 
+    from lx06_tool.utils.sudo import sudo_run
+
     pkg_names = [d.package_name for d in missing]
 
     if os_info.pkg_manager == "apt":
-        await _run_install(["sudo", "apt-get", "update", "-q"], sudo_password=sudo_password)
+        result = await sudo_run(
+            ["apt-get", "update", "-q"],
+            password=sudo_password, timeout=120,
+        )
+        if not result.ok:
+            raise DependencyInstallError(
+                f"apt-get update failed:\n{result.output}"
+            )
 
-    cmd = os_info.install_cmd_prefix + pkg_names
-    result = await _sudo_run(cmd, timeout=300, sudo_password=sudo_password)
-    if result.returncode != 0:
+    # install_cmd_prefix includes "sudo" prefix; PTY sudo_run adds it, so skip [0]
+    cmd = os_info.install_cmd_prefix[1:] + pkg_names
+    result = await sudo_run(cmd, password=sudo_password, timeout=300)
+    if not result.ok:
         raise DependencyInstallError(
             f"Package installation failed (exit {result.returncode}):\n"
-            f"{result.stderr or result.stdout}"
+            f"{result.output}"
         )
-
-
-async def _run_install(
-    cmd: list[str],
-    *,
-    timeout: int = 120,
-    sudo_password: str = "",
-) -> None:
-    result = await _sudo_run(cmd, timeout=timeout, sudo_password=sudo_password)
-    if result.returncode != 0:
-        raise DependencyInstallError(
-            f"Command {' '.join(cmd)} failed: {result.stderr}"
-        )
-
-
-async def _sudo_run(
-    cmd: list[str],
-    *,
-    timeout: int = 60,
-    sudo_password: str = "",
-    stdin_data: Optional[str] = None,
-) -> "RunResult":
-    """Run a sudo command, injecting password via stdin when available.
-
-    When both *sudo_password* and *stdin_data* are provided the
-    password line is prepended to *stdin_data*.
-    """
-    effective_stdin = stdin_data
-    if sudo_password and cmd and cmd[0] == "sudo":
-        cmd = ["sudo", "-S"] + cmd[1:]
-        pw_line = sudo_password + "\n"
-        effective_stdin = pw_line + (stdin_data or "")
-    return await run(cmd, timeout=timeout, stdin_data=effective_stdin)
 
 
 # ─── Docker Readiness ─────────────────────────────────────────────────────────
@@ -389,6 +366,7 @@ async def install_udev_rules(
     """
     # Write rules file via PTY-based sudo
     from lx06_tool.exceptions import UdevRulesError
+    from lx06_tool.utils.sudo import sudo_run, sudo_write_file
 
     result = await sudo_write_file(
         rules_content, dest, password=sudo_password, timeout=10,
