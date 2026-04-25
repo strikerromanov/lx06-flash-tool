@@ -1,14 +1,14 @@
-"""Environment screen — dependency checking and installation."""
+"""Environment screen — dependency checking and installation with sudo support."""
 
 from __future__ import annotations
 
 import logging
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, Static, RichLog
+from textual.widgets import Button, Input, Markdown, RichLog, Static
 
 from lx06_tool.app import LX06App
 
@@ -32,6 +32,18 @@ class EnvironmentScreen(Screen):
         align: center middle;
         padding: 1 0;
     }
+    #sudo-row {
+        height: 3;
+        margin: 0 0 1 0;
+        align: center middle;
+    }
+    #sudo-row Static {
+        width: auto;
+        padding: 0 1;
+    }
+    #sudo-input {
+        width: 30;
+    }
     """
 
     check_started: reactive[bool] = reactive(False)
@@ -41,13 +53,30 @@ class EnvironmentScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Markdown("## Phase 1: Environment Setup\nChecking your system for required dependencies...")
         yield RichLog(id="env-log", highlight=True, markup=True)
+        with Horizontal(id="sudo-row"):
+            yield Static("🔒 Sudo Password:")
+            yield Input(
+                placeholder="Enter your sudo password...",
+                password=True,
+                id="sudo-input",
+            )
         with Vertical(id="env-actions"):
             yield Button("Check Environment", variant="primary", id="check-btn")
             yield Button("Install Missing", variant="warning", id="install-btn", disabled=True)
             yield Button("Continue", variant="success", id="continue-btn", disabled=True)
 
     def on_mount(self) -> None:
-        self.query_one(RichLog).write("Ready to check environment. Click 'Check Environment' to start.")
+        self.query_one(RichLog).write(
+            "Ready to check environment. Click 'Check Environment' to start.\n"
+            "Enter your sudo password above if packages need to be installed."
+        )
+
+    def _get_sudo_password(self) -> str:
+        """Get the sudo password from the input field."""
+        try:
+            return self.query_one("#sudo-input", Input).value.strip()
+        except Exception:
+            return ""
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "check-btn":
@@ -70,7 +99,7 @@ class EnvironmentScreen(Screen):
             return
 
         try:
-            mgr = app.get_env_manager()
+            mgr = app.get_env_manager(sudo_password=self._get_sudo_password())
             report = await mgr.check()
 
             log.write(f"\n[bold]OS:[/] {report.os_info.name} {report.os_info.version}")
@@ -98,15 +127,21 @@ class EnvironmentScreen(Screen):
             logger.error("Environment check failed: %s", exc, exc_info=True)
 
     async def _run_install(self) -> None:
-        """Install missing dependencies."""
+        """Install missing dependencies using sudo password."""
         log = self.query_one(RichLog)
-        log.write("\n[bold blue]Installing missing dependencies...[/]")
+        sudo_pass = self._get_sudo_password()
+
+        if not sudo_pass:
+            log.write("\n[bold red]Please enter your sudo password above first![/]")
+            return
+
+        log.write("\n[bold blue]Installing missing dependencies (using sudo)...[/]")
         app = self.app
         if not isinstance(app, LX06App):
             return
 
         try:
-            mgr = app.get_env_manager()
+            mgr = app.get_env_manager(sudo_password=sudo_pass)
             report = await mgr.check()
 
             if report.missing_packages:

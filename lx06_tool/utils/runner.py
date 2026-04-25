@@ -92,11 +92,13 @@ class AsyncRunner:
         env: dict[str, str] | None = None,
         cwd: Path | str | None = None,
         sudo: bool = False,
+        sudo_password: str | None = None,
     ):
         self._default_timeout = default_timeout
         self._env = {**os.environ, **(env or {})}
         self._cwd = str(cwd) if cwd else None
         self._sudo = sudo
+        self._sudo_password = sudo_password
 
     async def run(
         self,
@@ -140,8 +142,16 @@ class AsyncRunner:
             cmd_list = list(command)
 
         use_sudo = sudo if sudo is not None else self._sudo
+        sudo_pass = self._sudo_password
         if use_sudo:
-            cmd_list = ["sudo", *cmd_list]
+            if sudo_pass:
+                cmd_list = ["sudo", "-S", *cmd_list]
+                if not input_text:
+                    input_text = sudo_pass + "\n"
+                else:
+                    input_text = sudo_pass + "\n" + input_text
+            else:
+                cmd_list = ["sudo", *cmd_list]
 
         # Build environment
         run_env = {**self._env, **(env or {})}

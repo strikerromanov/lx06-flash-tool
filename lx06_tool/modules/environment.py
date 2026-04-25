@@ -120,9 +120,11 @@ class EnvironmentManager:
         self,
         runner: AsyncRunner | None = None,
         downloader: AsyncDownloader | None = None,
+        sudo_password: str | None = None,
     ):
-        self._runner = runner or AsyncRunner(default_timeout=60.0, sudo=True)
+        self._runner = runner or AsyncRunner(default_timeout=60.0, sudo=True, sudo_password=sudo_password)
         self._downloader = downloader or AsyncDownloader()
+        self._sudo_password = sudo_password
 
     # ── OS Detection ─────────────────────────────────────────────────────────
 

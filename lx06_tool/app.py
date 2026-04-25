@@ -277,9 +277,8 @@ class LX06App(App):
     def flash_result(self, value: FlashResult) -> None:
         self._flash_result = value
 
-    def get_env_manager(self) -> EnvironmentManager:
-        if self._env_manager is None:
-            self._env_manager = EnvironmentManager()
+    def get_env_manager(self, sudo_password: str | None = None) -> EnvironmentManager:
+        self._env_manager = EnvironmentManager(sudo_password=sudo_password)
         return self._env_manager
 
     def get_usb_scanner(self) -> USBScanner:
@@ -289,8 +288,8 @@ class LX06App(App):
 
     def get_aml_tool(self) -> AmlogicTool:
         if self._aml_tool is None:
-            aml_path = self._config.aml_tool_path
-            if not aml_path or not aml_path.exists():
+            aml_path = self._config.update_exe_path
+            if not aml_path or not Path(aml_path).exists():
                 aml_path = Path("/usr/local/bin/aml-flash-tool/update")
             self._aml_tool = AmlogicTool(update_exe_path=aml_path)
         return self._aml_tool
