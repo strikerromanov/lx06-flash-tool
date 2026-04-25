@@ -136,12 +136,20 @@ class CustomizationChoices:
     install_dlna: bool = False          # upmpdcli + mpd
     install_snapcast: bool = False      # squeezelite + snapclient
     install_spotify: bool = False       # librespot
+    install_squeezelite: bool = False   # squeezelite standalone
+
+    # ── Media Settings
+    media_device_name: str = "LX06-Speaker"
+    spotify_username: str = ""
+    spotify_password: str = ""
+    audio_output: str = "default"
 
     # ── AI Brain
     ai_mode: str = "none"              # "none" | "soft" (xiaogpt) | "hard" (open-xiaoai)
     llm_provider: str = ""             # "openai" | "gemini" | "kimi"
     llm_api_key: str = ""
     llm_model: str = ""
+    llm_api_base: str = ""             # Custom API endpoint
     custom_wake_word: str = ""          # Hard-patch only
     ai_server_url: str = ""            # Hard-patch only
 

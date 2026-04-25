@@ -384,7 +384,7 @@ class AIBrainInstaller:
         wake word settings, and audio parameters.
         """
         server_url = choices.ai_server_url or "ws://localhost:8080/ws"
-        wake_word = choices.wake_word or "Hey Computer"
+        wake_word = choices.custom_wake_word or "Hey Computer"
         sample_rate = 16000
 
         return (

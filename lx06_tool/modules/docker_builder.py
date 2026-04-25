@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Callable
 
 from lx06_tool.constants import FIRMWARE_BUILDER_IMAGE, DOCKERFILE_PATH
-from lx06_tool.exceptions import DockerBuildError, DockerNotAvailableError
+from lx06_tool.exceptions import DockerBuildError
 from lx06_tool.utils.docker_utils import DockerUtils
-from lx06_tool.utils.compat import AsyncRunner, CommandResult
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +259,7 @@ class DockerBuilder:
         )
 
         env_vars = {
-            "MK SquashFS_CMD": mksquashfs_cmd,
+            "MKSQUASHFS_CMD": mksquashfs_cmd,
         }
 
         build_result = await self.run_build(

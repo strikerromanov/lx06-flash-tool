@@ -15,9 +15,10 @@ from __future__ import annotations
 class LX06Error(Exception):
     """Base exception for all LX06 Flash Tool errors."""
 
-    def __init__(self, message: str, *, recoverable: bool = True) -> None:
+    def __init__(self, message: str, *, recoverable: bool = True, details: str = "") -> None:
         super().__init__(message)
         self.recoverable = recoverable  # Whether the state machine can back-track
+        self.details = details          # Optional extra context
 
 
 # ─── Environment / Host Setup ─────────────────────────────────────────────────

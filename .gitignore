@@ -44,3 +44,13 @@ Thumbs.db
 # Resources binaries (large ARM64 binaries)
 resources/binaries/*.tar.gz
 resources/binaries/*.zip
+
+# Runtime directories (XDG-based, not in repo)
+tools/
+build/
+backups/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc

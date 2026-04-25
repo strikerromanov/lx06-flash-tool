@@ -25,7 +25,7 @@ from lx06_tool.exceptions import (
     SquashFSRepackError,
     InvalidFirmwareError,
 )
-from lx06_tool.utils.compat import AsyncRunner, CommandResult
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ class SquashFSTool:
         info: dict[str, str | int] = {}
         for line in output.splitlines():
             line = line.strip()
-            if "Compression" in line and "" in line:
+            if "Compression" in line:
                 info["compression"] = line.split()[-1]
             elif "Block size" in line:
                 try:

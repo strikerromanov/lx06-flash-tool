@@ -109,7 +109,7 @@ class AmlogicTool:
                 )
                 if sudo_result.ok:
                     info = parse_identify_output(
-                        sudo_result.stdout + sudo_result.stderr
+                        sudo_result.output
                     )
             except Exception:
                 pass  # sudo failed, return original result

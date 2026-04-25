@@ -60,7 +60,7 @@ def setup_logging(
 
     # File handler (rotating)
     if file_log:
-        target_dir = log_dir or DEFAULT_LOG_DIR
+        target_dir = log_dir or Path(DEFAULT_LOG_DIR)
         target_dir.mkdir(parents=True, exist_ok=True)
         log_file = target_dir / "lx06-tool.log"
 

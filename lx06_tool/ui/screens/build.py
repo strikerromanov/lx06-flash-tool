@@ -102,15 +102,20 @@ class BuildScreen(Screen):
             # Step 2: Run the full pipeline
             on_step("Running customization pipeline...", 10)
 
-            output_image = await pipeline.run(
-                choices=choices,
+            result = await pipeline.run_pipeline(
                 on_output=lambda s, l: log.write(f"  [{s}] {l}"),
             )
 
+            if not result.success:
+                log.write(f"\n[bold red]Pipeline failed:[/] {', '.join(result.steps_failed)}")
+                self.query_one("#start-btn", Button).disabled = False
+                return
+
             on_step("Firmware build complete!", 100)
             log.write(f"\n[bold green]Custom firmware built successfully![/]")
-            log.write(f"  Output: {output_image}")
-            log.write(f"  Size: {output_image.stat().st_size:,} bytes")
+            if result.output_system:
+                log.write(f"  Output: {result.output_system}")
+                log.write(f"  Size: {result.output_system.stat().st_size:,} bytes")
 
             self.query_one("#continue-btn", Button).disabled = False
             app.update_status("Build complete")
