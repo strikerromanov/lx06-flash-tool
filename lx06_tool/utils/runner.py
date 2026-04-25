@@ -1,301 +1,202 @@
 """
-Async subprocess runner for LX06 Flash Tool.
+lx06_tool/utils/runner.py
+--------------------------
+Async subprocess execution engine.
 
-Provides a unified interface for running external commands (shell, update.exe,
-squashfs tools, docker) with:
-- Non-blocking execution via asyncio
-- Real-time stdout/stderr capture
-- Timeout handling
-- Output callback for UI progress updates
+All external tool calls (update.exe, pacman, docker, unsquashfs, …) go
+through this module so that:
+
+  • The Textual event loop is never blocked.
+  • Output is captured and can be streamed to the UI in real time.
+  • Timeouts are enforced without risking zombie processes.
+  • The caller always gets a structured RunResult, not a bare string.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
-import shlex
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Callable
-
-logger = logging.getLogger(__name__)
+from typing import AsyncIterator, Callable, Optional, Union
 
 
-# ── Result Dataclass ────────────────────────────────────────────────────────
-
+# ─── Result Type ──────────────────────────────────────────────────────────────
 
 @dataclass
-class CommandResult:
-    """Result of a completed subprocess command."""
-
-    command: list[str]
+class RunResult:
+    """Completed subprocess result."""
+    cmd: list[str]
     returncode: int
-    stdout: str = ""
-    stderr: str = ""
+    stdout: str
+    stderr: str
     timed_out: bool = False
 
     @property
-    def success(self) -> bool:
-        """Whether the command exited with code 0."""
-        return self.returncode == 0
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.timed_out
 
-    @property
-    def combined_output(self) -> str:
-        """Combined stdout + stderr."""
-        parts = []
-        if self.stdout:
-            parts.append(self.stdout)
-        if self.stderr:
-            parts.append(self.stderr)
-        return "\n".join(parts)
-
-    def __repr__(self) -> str:
-        cmd_str = " ".join(self.command[:3])
-        if len(self.command) > 3:
-            cmd_str += " ..."
-        status = "OK" if self.success else f"RC={self.returncode}"
-        return f"CommandResult({cmd_str}, {status})"
+    def raise_on_error(self, context: str = "") -> None:
+        """Raise RuntimeError with a helpful message if the command failed."""
+        if not self.ok:
+            prefix = f"[{context}] " if context else ""
+            detail = self.stderr.strip() or self.stdout.strip()
+            reason = "timed out" if self.timed_out else f"exit {self.returncode}"
+            raise RuntimeError(
+                f"{prefix}Command failed ({reason}): {' '.join(self.cmd)}\n{detail}"
+            )
 
 
-# ── Output Callback Type ────────────────────────────────────────────────────
+# ─── Core Runner ──────────────────────────────────────────────────────────────
 
-OutputCallback = Callable[[str, str], None]  # (stream_name, line) -> None
-
-
-# ── Async Runner ────────────────────────────────────────────────────────────
-
-
-class AsyncRunner:
-    """Manages async subprocess execution with output capture.
-
-    Usage:
-        runner = AsyncRunner()
-        result = await runner.run(["ls", "-la"])
-        if result.success:
-            print(result.stdout)
-
-    With real-time output:
-        def on_output(stream: str, line: str):
-            print(f"[{stream}] {line}")
-
-        result = await runner.run(
-            ["update.exe", "identify"],
-            on_output=on_output,
-            timeout=30,
-        )
+async def run(
+    cmd: list[str | Path],
+    *,
+    cwd: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    timeout: int = 60,
+    stdin_data: Optional[str] = None,
+    capture: bool = True,
+) -> RunResult:
     """
+    Run a command asynchronously and return a RunResult.
 
-    def __init__(
-        self,
-        default_timeout: float = 300.0,
-        env: dict[str, str] | None = None,
-        cwd: Path | str | None = None,
-        sudo: bool = False,
-        sudo_password: str | None = None,
-    ):
-        self._default_timeout = default_timeout
-        self._env = {**os.environ, **(env or {})}
-        self._cwd = str(cwd) if cwd else None
-        self._sudo = sudo
-        self._sudo_password = sudo_password
+    Parameters
+    ----------
+    cmd         : Command + arguments. Path objects are converted to str.
+    cwd         : Working directory (default: current directory).
+    env         : Override environment variables (merged with os.environ).
+    timeout     : Kill the process after this many seconds.
+    stdin_data  : Optional string to pipe to the process's stdin.
+    capture     : If True, capture stdout/stderr. If False, inherit them
+                  (useful for interactive sudo password prompts).
+    """
+    str_cmd = [str(c) for c in cmd]
 
-    async def run(
-        self,
-        command: list[str] | str,
-        *,
-        timeout: float | None = None,
-        on_output: OutputCallback | None = None,
-        on_stdout: OutputCallback | None = None,
-        on_stderr: OutputCallback | None = None,
-        cwd: Path | str | None = None,
-        env: dict[str, str] | None = None,
-        sudo: bool | None = None,
-        check: bool = False,
-        input_text: str | None = None,
-    ) -> CommandResult:
-        """Execute a command asynchronously and capture its output.
+    stdout_mode = asyncio.subprocess.PIPE if capture else None
+    stderr_mode = asyncio.subprocess.PIPE if capture else None
+    stdin_mode  = asyncio.subprocess.PIPE if stdin_data is not None else None
 
-        Args:
-            command: Command as a list of args or a shell string.
-            timeout: Max seconds to wait. None uses default_timeout.
-            on_output: Callback for any output line (stdout or stderr).
-            on_stdout: Callback for stdout lines only.
-            on_stderr: Callback for stderr lines only.
-            cwd: Working directory override.
-            env: Extra environment variables.
-            sudo: Prepend 'sudo' to command. None uses instance default.
-            check: If True, raise on non-zero exit code.
-            input_text: Text to pipe to stdin.
+    proc = await asyncio.create_subprocess_exec(
+        *str_cmd,
+        stdout=stdout_mode,
+        stderr=stderr_mode,
+        stdin=stdin_mode,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+    )
 
-        Returns:
-            CommandResult with captured stdout, stderr, and returncode.
+    timed_out = False
+    try:
+        stdin_bytes = stdin_data.encode() if stdin_data else None
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=stdin_bytes),
+            timeout=float(timeout),
+        )
+    except asyncio.TimeoutError:
+        timed_out = True
+        _terminate(proc)
+        stdout_bytes, stderr_bytes = b"", b""
 
-        Raises:
-            CommandTimeoutError: If the command exceeds the timeout.
-            CommandError: If check=True and returncode != 0.
-        """
-        # Build command list
-        if isinstance(command, str):
-            cmd_list = shlex.split(command)
-        else:
-            cmd_list = list(command)
+    stdout_str = stdout_bytes.decode(errors="replace").strip() if stdout_bytes else ""
+    stderr_str = stderr_bytes.decode(errors="replace").strip() if stderr_bytes else ""
+    rc = proc.returncode if proc.returncode is not None else -1
 
-        use_sudo = sudo if sudo is not None else self._sudo
-        sudo_pass = self._sudo_password
-        if use_sudo:
-            if sudo_pass:
-                cmd_list = ["sudo", "-S", *cmd_list]
-                if not input_text:
-                    input_text = sudo_pass + "\n"
-                else:
-                    input_text = sudo_pass + "\n" + input_text
-            else:
-                cmd_list = ["sudo", *cmd_list]
+    return RunResult(
+        cmd=str_cmd,
+        returncode=rc,
+        stdout=stdout_str,
+        stderr=stderr_str,
+        timed_out=timed_out,
+    )
 
-        # Build environment
-        run_env = {**self._env, **(env or {})}
 
-        # Working directory
-        run_cwd = str(cwd) if cwd else self._cwd
+async def run_streaming(
+    cmd: list[str | Path],
+    *,
+    cwd: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    timeout: int = 300,
+    on_stdout: Optional[Callable[[str], None]] = None,
+    on_stderr: Optional[Callable[[str], None]] = None,
+) -> RunResult:
+    """
+    Run a command and stream output line-by-line to callbacks.
 
-        effective_timeout = timeout if timeout is not None else self._default_timeout
+    Useful for long-running operations (squashfs, flashing) where the UI
+    should display live progress rather than waiting for completion.
 
-        logger.debug("Running: %s (timeout=%s, cwd=%s)", " ".join(cmd_list), effective_timeout, run_cwd)
+    Parameters
+    ----------
+    on_stdout : Called with each stdout line (stripped, no trailing newline).
+    on_stderr : Called with each stderr line.
+    """
+    str_cmd = [str(c) for c in cmd]
 
+    proc = await asyncio.create_subprocess_exec(
+        *str_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    async def _read(stream: asyncio.StreamReader, lines: list[str],
+                    callback: Optional[Callable[[str], None]]) -> None:
+        async for raw_line in stream:
+            line = raw_line.decode(errors="replace").rstrip("\n")
+            lines.append(line)
+            if callback:
+                callback(line)
+
+    timed_out = False
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read(proc.stdout, stdout_lines, on_stdout),   # type: ignore[arg-type]
+                _read(proc.stderr, stderr_lines, on_stderr),   # type: ignore[arg-type]
+                proc.wait(),
+            ),
+            timeout=float(timeout),
+        )
+    except asyncio.TimeoutError:
+        timed_out = True
+        _terminate(proc)
+
+    rc = proc.returncode if proc.returncode is not None else -1
+    return RunResult(
+        cmd=str_cmd,
+        returncode=rc,
+        stdout="\n".join(stdout_lines),
+        stderr="\n".join(stderr_lines),
+        timed_out=timed_out,
+    )
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _terminate(proc: asyncio.subprocess.Process) -> None:
+    """Gracefully terminate, then SIGKILL if still alive."""
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    # Give 2 seconds before SIGKILL
+    async def _kill() -> None:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdin=asyncio.subprocess.PIPE if input_text else asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=run_cwd,
-                env=run_env,
-            )
-        except FileNotFoundError as exc:
-            raise CommandError(
-                f"Command not found: {cmd_list[0]}. "
-                f"Is it installed and in PATH?"
-            ) from exc
-        except PermissionError as exc:
-            raise CommandError(
-                f"Permission denied executing: {cmd_list[0]}"
-            ) from exc
-
-        # Collect output with optional callbacks
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-        async def _read_stream(
-            stream: asyncio.StreamReader,
-            collector: list[str],
-            stream_name: str,
-            specific_cb: OutputCallback | None,
-        ) -> None:
-            """Read lines from a stream, calling callbacks and collecting."""
-            while True:
-                line_bytes = await stream.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
-                collector.append(line)
-                if on_output:
-                    try:
-                        on_output(stream_name, line)
-                    except Exception:
-                        pass
-                if specific_cb:
-                    try:
-                        specific_cb(stream_name, line)
-                    except Exception:
-                        pass
-
-        try:
-            # Feed stdin if provided
-            stdin_task = None
-            if input_text:
-                stdin_task = asyncio.ensure_future(
-                    self._write_stdin(proc, input_text)
-                )
-
-            # Read both streams concurrently
-            await asyncio.gather(
-                _read_stream(proc.stdout, stdout_lines, "stdout", on_stdout),
-                _read_stream(proc.stderr, stderr_lines, "stderr", on_stderr),
-            )
-
-            # Wait for process to finish (with timeout)
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
             try:
-                returncode = await asyncio.wait_for(proc.wait(), timeout=effective_timeout)
-            except asyncio.TimeoutError:
                 proc.kill()
-                await proc.wait()
-                result = CommandResult(
-                    command=cmd_list,
-                    returncode=-1,
-                    stdout="\n".join(stdout_lines),
-                    stderr="\n".join(stderr_lines),
-                    timed_out=True,
-                )
-                logger.warning("Command timed out after %ss: %s", effective_timeout, " ".join(cmd_list))
-                if check:
-                    raise CommandTimeoutError(f"Command timed out: {' '.join(cmd_list)}")
-                return result
-
-        except (CommandTimeoutError, CommandError):
-            raise
-        except Exception as exc:
-            raise CommandError(f"Failed to run {' '.join(cmd_list)}: {exc}") from exc
-
-        result = CommandResult(
-            command=cmd_list,
-            returncode=returncode,
-            stdout="\n".join(stdout_lines),
-            stderr="\n".join(stderr_lines),
-        )
-
-        logger.debug(
-            "Command finished: rc=%d, stdout=%d lines, stderr=%d lines",
-            returncode,
-            len(stdout_lines),
-            len(stderr_lines),
-        )
-
-        if check and not result.success:
-            raise CommandError(
-                f"Command failed (rc={returncode}): {' '.join(cmd_list)}\n"
-                f"stderr: {result.stderr[:500]}"
-            )
-
-        return result
-
-    async def run_simple(self, command: list[str] | str, **kwargs) -> str:
-        """Run a command and return stdout as a string.
-
-        Convenience wrapper around run() for simple commands where
-        you just want the output.
-
-        Raises:
-            CommandError: If the command fails.
-        """
-        result = await self.run(command, **kwargs, check=True)
-        return result.stdout
-
-    @staticmethod
-    async def _write_stdin(proc: asyncio.subprocess.Process, text: str) -> None:
-        """Write text to a process stdin and close it."""
-        if proc.stdin:
-            proc.stdin.write(text.encode())
-            await proc.stdin.drain()
-            proc.stdin.close()
+            except ProcessLookupError:
+                pass
+    asyncio.create_task(_kill())
 
 
-# ── Runner Errors ───────────────────────────────────────────────────────────
-
-
-class CommandError(Exception):
-    """A subprocess command failed."""
-
-
-class CommandTimeoutError(CommandError):
-    """A subprocess command exceeded its timeout."""
+async def which_async(binary: str) -> Optional[str]:
+    """Async shutil.which — returns path string or None."""
+    result = await run(["which", binary], timeout=5)
+    return result.stdout.strip() or None

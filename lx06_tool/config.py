@@ -1,292 +1,281 @@
 """
-Configuration management and data models for LX06 Flash Tool.
+lx06_tool/config.py
+-------------------
+Configuration data models and persistence.
 
-Provides:
-- Data models: LX06Device, PartitionBackup, BackupSet, CustomizationChoices, AppConfig
-- YAML-based config loading/saving
-- Runtime state persistence between sessions
+Uses `platformdirs` for XDG-compliant paths so the tool works correctly
+regardless of which directory the user launches it from.
+
+XDG locations (Linux):
+  Config  → ~/.config/lx06-tool/config.yaml
+  Data    → ~/.local/share/lx06-tool/  (backups, tools)
+  Cache   → ~/.cache/lx06-tool/        (build workspace)
 """
 
 from __future__ import annotations
 
-import json
-import logging
-from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import yaml
+from platformdirs import user_cache_path, user_config_path, user_data_path
 
 from lx06_tool.constants import (
-    DEFAULT_CONFIG_DIR,
-    DEFAULT_CONFIG_FILE,
-    DEFAULT_LOG_DIR,
-    PARTITION_MAP,
+    APP_NAME,
+    BACKUP_SUBDIR,
+    BUILD_SUBDIR,
+    DOCKER_BUILD_IMAGE,
+    TOOLS_SUBDIR,
 )
 
-logger = logging.getLogger(__name__)
+# ─── XDG Paths ────────────────────────────────────────────────────────────────
+
+def _xdg_config_dir() -> Path:
+    return user_config_path(APP_NAME)
 
 
-# ── Data Models ─────────────────────────────────────────────────────────────
+def _xdg_data_dir() -> Path:
+    return user_data_path(APP_NAME)
 
+
+def _xdg_cache_dir() -> Path:
+    return user_cache_path(APP_NAME)
+
+
+def default_config_path() -> Path:
+    return _xdg_config_dir() / "config.yaml"
+
+
+def default_backup_dir() -> Path:
+    return _xdg_data_dir() / BACKUP_SUBDIR
+
+
+def default_build_dir() -> Path:
+    # Build workspace lives in cache — it's throwaway data.
+    return _xdg_cache_dir() / BUILD_SUBDIR
+
+
+def default_tools_dir() -> Path:
+    return _xdg_data_dir() / TOOLS_SUBDIR
+
+
+# ─── Device Model ─────────────────────────────────────────────────────────────
 
 @dataclass
 class LX06Device:
-    """Represents the connected LX06 device and its partition state.
-
-    Populated at runtime after USB handshake succeeds.
-    """
-
+    """Runtime state for the connected LX06 device."""
     connected: bool = False
     serial: str = ""
     chip_id: str = ""
+    firmware_version: str = ""
+
+    # A/B partition tracking — populated after DEVICE_IDENTIFIED
     active_boot: str = ""       # "boot0" or "boot1"
-    inactive_boot: str = ""     # Complement of active_boot
+    inactive_boot: str = ""
     active_system: str = ""     # "system0" or "system1"
-    inactive_system: str = ""   # Complement of active_system
+    inactive_system: str = ""
+
     bootloader_unlocked: bool = False
 
-    def set_active_partition(self, boot_slot: int, system_slot: int) -> None:
-        """Set the active/inactive partition pair from slot indices (0 or 1).
+    def is_ab_detected(self) -> bool:
+        return bool(self.active_system and self.inactive_system)
 
-        Args:
-            boot_slot: Active boot partition index (0 or 1).
-            system_slot: Active system partition index (0 or 1).
-        """
-        self.active_boot = f"boot{boot_slot}"
-        self.inactive_boot = f"boot{1 - boot_slot}"
-        self.active_system = f"system{system_slot}"
-        self.inactive_system = f"system{1 - system_slot}"
 
+# ─── Backup Model ─────────────────────────────────────────────────────────────
 
 @dataclass
 class PartitionBackup:
-    """Tracks a single partition backup file."""
-
-    name: str                  # e.g. "mtd0"
-    label: str                 # e.g. "bootloader"
+    """Tracks a single dumped partition."""
+    name: str                        # "mtd0", "mtd4", …
+    label: str                       # "bootloader", "system0", …
+    path: Optional[Path] = None
     size_bytes: int = 0
-    expected_size: int = 0     # From PARTITION_MAP
+    expected_size: int = 0
     sha256: str = ""
     md5: str = ""
-    path: Optional[str] = None  # Serialized as string for YAML compat
     verified: bool = False
 
-    def __post_init__(self) -> None:
-        if self.expected_size == 0 and self.name in PARTITION_MAP:
-            self.expected_size = PARTITION_MAP[self.name]["size"]
+    @property
+    def size_ok(self) -> bool:
+        if self.expected_size == 0:
+            return self.size_bytes > 0
+        # Allow ≥ 50 % of expected (NAND may have bad blocks)
+        return self.size_bytes >= self.expected_size * 0.5
 
 
 @dataclass
 class BackupSet:
-    """Complete set of partition backups for a device."""
-
-    partitions: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timestamp: str = ""
+    """Complete set of partition backups for one session."""
+    partitions: dict[str, PartitionBackup] = field(default_factory=dict)
+    timestamp: str = ""            # ISO-8601 timestamp of backup run
+    backup_dir: Optional[Path] = None
     all_verified: bool = False
 
-    def add_partition(self, backup: PartitionBackup) -> None:
-        """Add or update a partition backup entry."""
-        self.partitions[backup.name] = asdict(backup)
+    @property
+    def is_complete(self) -> bool:
+        return bool(self.partitions) and all(
+            p.verified for p in self.partitions.values()
+        )
 
-    def get_partition(self, mtd_name: str) -> PartitionBackup | None:
-        """Retrieve a partition backup by MTD name."""
-        if mtd_name in self.partitions:
-            return PartitionBackup(**self.partitions[mtd_name])
-        return None
 
-    def mark_timestamp(self) -> None:
-        """Set the timestamp to the current UTC time."""
-        self.timestamp = datetime.utcnow().isoformat() + "Z"
-
+# ─── Customization Choices ────────────────────────────────────────────────────
 
 @dataclass
 class CustomizationChoices:
-    """User's feature selections for firmware modification.
+    """User's a-la-carte firmware modification selections."""
 
-    Populated by the interactive customization menu (Phase 3).
-    """
-
-    # Debloat
-    debloat_enabled: bool = True           # Master switch for debloat
+    # ── Debloat
     remove_telemetry: bool = True
-    remove_ota: bool = True                # Remove OTA auto-updater
-    remove_xiaoai: bool = False            # Remove stock voice engine (aggressive)
-    remove_auto_updater: bool = True       # Alias for remove_ota
-    remove_xiaoai_voice: bool = False      # Alias for remove_xiaoai
+    remove_auto_updater: bool = True
+    remove_xiaoai_voice: bool = False   # Must be False for soft-patch AI mode
 
-    # Media Players
-    media_enabled: bool = False            # Master switch for media suite
-    install_airplay: bool = False          # shairport-sync
-    install_dlna: bool = False             # upmpdcli + mpd
-    install_snapcast: bool = False         # snapcast client
-    install_squeezelite: bool = False      # squeezelite
-    install_spotify: bool = False          # librespot
+    # ── Media Players
+    install_airplay: bool = False       # shairport-sync
+    install_dlna: bool = False          # upmpdcli + mpd
+    install_snapcast: bool = False      # squeezelite + snapclient
+    install_spotify: bool = False       # librespot
 
-    # Media Settings
-    media_device_name: str = "LX06-Speaker"  # Cast receiver name
-    spotify_username: str = ""
-    spotify_password: str = ""
-    audio_output: str = "default"           # ALSA output device
-
-    # AI Brain
-    ai_enabled: bool = False               # Master switch for AI
-    ai_mode: str = "none"                  # "none", "soft" (xiaogpt), "hard" (open-xiaoai)
-    llm_provider: str = ""                 # "openai", "gemini", "kimi"
+    # ── AI Brain
+    ai_mode: str = "none"              # "none" | "soft" (xiaogpt) | "hard" (open-xiaoai)
+    llm_provider: str = ""             # "openai" | "gemini" | "kimi"
     llm_api_key: str = ""
     llm_model: str = ""
-    llm_api_base: str = ""                 # Custom API base URL
-    wake_word: str = ""                    # For hard-patch mode
-    custom_wake_word: str = ""             # Alias for wake_word
-    ai_server_url: str = ""               # For hard-patch mode (open-xiaoai server)
+    custom_wake_word: str = ""          # Hard-patch only
+    ai_server_url: str = ""            # Hard-patch only
 
-    def __post_init__(self) -> None:
-        """Synchronize alias fields."""
-        if self.remove_ota:
-            self.remove_auto_updater = True
-        if self.remove_xiaoai:
-            self.remove_xiaoai_voice = True
-        if self.wake_word and not self.custom_wake_word:
-            self.custom_wake_word = self.wake_word
-        elif self.custom_wake_word and not self.wake_word:
-            self.wake_word = self.custom_wake_word
+    def validate(self) -> list[str]:
+        """Return a list of validation error strings (empty = valid)."""
+        errors: list[str] = []
+        if self.ai_mode == "soft" and self.remove_xiaoai_voice:
+            errors.append(
+                "Soft AI mode (xiaogpt) requires the Xiaoai voice engine. "
+                "Uncheck 'Remove Xiaoai voice' or switch to hard AI mode."
+            )
+        if self.ai_mode in ("soft", "hard") and not self.llm_api_key:
+            errors.append(
+                f"AI mode '{self.ai_mode}' requires an LLM API key."
+            )
+        if self.ai_mode == "hard" and not self.ai_server_url:
+            errors.append(
+                "Hard AI mode (open-xiaoai) requires an AI server URL."
+            )
+        return errors
 
-    @property
-    def has_media_selected(self) -> bool:
-        """Check if any media player option was selected."""
-        return any([
-            self.install_airplay,
-            self.install_dlna,
-            self.install_snapcast,
-            self.install_spotify,
-            self.install_squeezelite,
-        ])
 
-    @property
-    def has_ai_selected(self) -> bool:
-        """Check if any AI mode was selected."""
-        return self.ai_mode in ("soft", "hard")
-
-    @property
-    def needs_api_key(self) -> bool:
-        """Check if an API key is required for the selected AI mode."""
-        return self.ai_mode == "soft"
+# ─── Application Config ───────────────────────────────────────────────────────
 
 @dataclass
 class AppConfig:
-    """Persistent application configuration.
+    """
+    Persistent application configuration.
 
-    Stored in ~/.config/lx06-tool/config.yaml.
-    Device, backup, and choices are runtime-only (not persisted to disk).
+    Saved to and loaded from ~/.config/lx06-tool/config.yaml.
+    Runtime device/backup state is NOT persisted (too volatile).
     """
 
-    # Paths
-    backup_dir: str = "./backups"
-    build_dir: str = "./build"
-    tools_dir: str = "./tools"
+    # ── Paths (stored as strings in YAML, converted to Path on load)
+    backup_dir: Path = field(default_factory=default_backup_dir)
+    build_dir: Path = field(default_factory=default_build_dir)
+    tools_dir: Path = field(default_factory=default_tools_dir)
 
-    # Tools (populated at runtime after download)
-    aml_flash_tool_path: str = ""
-    update_exe_path: str = ""
+    # Resolved path to the `update` binary (aml-flash-tool)
+    update_exe_path: Optional[Path] = None
 
-    # Docker
+    # ── Docker
     use_docker_build: bool = True
-    docker_build_image: str = "lx06-firmware-builder:latest"
+    docker_build_image: str = DOCKER_BUILD_IMAGE
 
-    # Network
+    # ── Network
     proxy: str = ""
-    github_mirror: str = ""
+    github_mirror: str = ""         # Useful for GFW users
 
-    # ── Runtime state (not persisted) ──
-    device: dict[str, Any] = field(default_factory=dict, repr=False)
-    backup: dict[str, Any] = field(default_factory=dict, repr=False)
-    choices: dict[str, Any] = field(default_factory=dict, repr=False)
+    # ── Runtime state (not persisted)
+    device: LX06Device = field(default_factory=LX06Device, repr=False)
+    backup: BackupSet = field(default_factory=BackupSet, repr=False)
+    choices: CustomizationChoices = field(
+        default_factory=CustomizationChoices, repr=False
+    )
 
-    # ── Persistence ─────────────────────────────────────────────────────────
-
-    @classmethod
-    def _persistent_fields(cls) -> set[str]:
-        """Fields that should be saved to/loaded from disk."""
-        return {
-            "backup_dir", "build_dir", "tools_dir",
-            "aml_flash_tool_path", "update_exe_path",
-            "use_docker_build", "docker_build_image",
-            "proxy", "github_mirror",
-        }
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize persistent fields to a dict for YAML storage."""
-        return {k: getattr(self, k) for k in self._persistent_fields()}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AppConfig:
-        """Deserialize from a dict, ignoring unknown keys."""
-        valid_keys = {f.name for f in fields(cls)}
-        filtered = {k: v for k, v in data.items() if k in valid_keys}
-        return cls(**filtered)
-
-    def save(self, path: Path | None = None) -> None:
-        """Save configuration to a YAML file."""
-        target = path or DEFAULT_CONFIG_FILE
-        target.parent.mkdir(parents=True, exist_ok=True)
-        data = self.to_dict()
-        with open(target, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=True)
-        logger.debug("Config saved to %s", target)
-
-    @classmethod
-    def load(cls, path: Path | None = None) -> AppConfig:
-        """Load configuration from a YAML file.
-
-        Returns a default AppConfig if the file doesn't exist.
-        """
-        source = path or DEFAULT_CONFIG_FILE
-        if not source.exists():
-            logger.debug("No config file at %s, using defaults", source)
-            return cls()
-        with open(source) as f:
-            data = yaml.safe_load(f) or {}
-        logger.debug("Config loaded from %s", source)
-        return cls.from_dict(data)
-
-    # ── Path Helpers ─────────────────────────────────────────────────────────
-
-    def get_backup_dir(self) -> Path:
-        """Resolve the backup directory path."""
-        return Path(self.backup_dir).resolve()
-
-    def get_build_dir(self) -> Path:
-        """Resolve the build directory path."""
-        return Path(self.build_dir).resolve()
-
-    def get_tools_dir(self) -> Path:
-        """Resolve the tools directory path."""
-        return Path(self.tools_dir).resolve()
-
-    def get_update_exe(self) -> Path | None:
-        """Resolve the update.exe path, or None if not set."""
-        if not self.update_exe_path:
-            return None
-        p = Path(self.update_exe_path)
-        return p if p.exists() else None
+    # ─────────────────────────────────────────────────────────────────
 
     def ensure_dirs(self) -> None:
-        """Create all working directories if they don't exist."""
-        for dir_path in [self.backup_dir, self.build_dir, self.tools_dir]:
-            Path(dir_path).resolve().mkdir(parents=True, exist_ok=True)
+        """Create all required directories (XDG + config dir)."""
+        for d in (self.backup_dir, self.build_dir, self.tools_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        default_config_path().parent.mkdir(parents=True, exist_ok=True)
+
+    # ─── Persistence ──────────────────────────────────────────────────
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "paths": {
+                "backup_dir":    str(self.backup_dir),
+                "build_dir":     str(self.build_dir),
+                "tools_dir":     str(self.tools_dir),
+                "update_exe":    str(self.update_exe_path) if self.update_exe_path else "",
+            },
+            "docker": {
+                "use_docker_build":  self.use_docker_build,
+                "build_image":       self.docker_build_image,
+            },
+            "network": {
+                "proxy":         self.proxy,
+                "github_mirror": self.github_mirror,
+            },
+        }
+
+    def save(self, path: Optional[Path] = None) -> None:
+        config_path = path or default_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(self.to_dict(), fh, default_flow_style=False)
+
+    @classmethod
+    def load(cls, path: Optional[Path] = None) -> "AppConfig":
+        config_path = path or default_config_path()
+        if not config_path.exists():
+            return cls()
+
+        with open(config_path, encoding="utf-8") as fh:
+            raw: dict = yaml.safe_load(fh) or {}
+
+        cfg = cls()
+
+        paths = raw.get("paths", {})
+        if paths.get("backup_dir"):
+            cfg.backup_dir = Path(paths["backup_dir"]).expanduser()
+        if paths.get("build_dir"):
+            cfg.build_dir = Path(paths["build_dir"]).expanduser()
+        if paths.get("tools_dir"):
+            cfg.tools_dir = Path(paths["tools_dir"]).expanduser()
+        if paths.get("update_exe"):
+            p = Path(paths["update_exe"]).expanduser()
+            cfg.update_exe_path = p if p != Path("") else None
+
+        docker = raw.get("docker", {})
+        cfg.use_docker_build = bool(docker.get("use_docker_build", True))
+        cfg.docker_build_image = str(docker.get("build_image", DOCKER_BUILD_IMAGE))
+
+        network = raw.get("network", {})
+        cfg.proxy = str(network.get("proxy", ""))
+        cfg.github_mirror = str(network.get("github_mirror", ""))
+
+        return cfg
 
 
-# ── Module-level convenience functions ──────────────────────────────────────
+# ─── Environment variable overrides (for CI/headless use) ─────────────────────
 
-
-def load_config(path: Path | None = None) -> AppConfig:
-    """Load configuration from disk (convenience wrapper)."""
-    config = AppConfig.load(path)
-    config.ensure_dirs()
-    return config
-
-
-def save_config(config: AppConfig, path: Path | None = None) -> None:
-    """Save configuration to disk (convenience wrapper)."""
-    config.save(path)
+def apply_env_overrides(cfg: AppConfig) -> None:
+    """Override config fields from environment variables."""
+    if val := os.environ.get("LX06_BACKUP_DIR"):
+        cfg.backup_dir = Path(val)
+    if val := os.environ.get("LX06_BUILD_DIR"):
+        cfg.build_dir = Path(val)
+    if val := os.environ.get("LX06_TOOLS_DIR"):
+        cfg.tools_dir = Path(val)
+    if val := os.environ.get("LX06_NO_DOCKER"):
+        cfg.use_docker_build = val.lower() not in ("1", "true", "yes")
+    if val := os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+        cfg.proxy = cfg.proxy or val

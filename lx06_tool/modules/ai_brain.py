@@ -28,7 +28,7 @@ from typing import Callable
 
 from lx06_tool.config import CustomizationChoices
 from lx06_tool.exceptions import FirmwareError
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class AIBrainInstaller:
         """
         result = AIBrainResult(mode=choices.ai_mode)
 
-        if not choices.ai_enabled:
+        if choices.ai_mode == "none":
             if on_output:
                 on_output("stdout", "  AI brain installation skipped.")
             return result

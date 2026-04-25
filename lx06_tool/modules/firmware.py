@@ -32,7 +32,7 @@ from lx06_tool.modules.media_suite import MediaSuiteInstaller
 from lx06_tool.modules.ai_brain import AIBrainInstaller
 from lx06_tool.modules.docker_builder import DockerBuilder
 from lx06_tool.utils.squashfs import SquashFSTool
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +161,9 @@ class FirmwareOrchestrator:
 
         try:
             self._paths.extract_dir.mkdir(parents=True, exist_ok=True)
-            await self._squashfs.unpack(
-                squashfs_image=self._paths.system_dump,
-                output_dir=self._paths.extract_dir,
+            await self._squashfs.extract(
+                self._paths.system_dump,
+                self._paths.extract_dir,
             )
             result.rootfs_size_before = self._dir_size(self._paths.rootfs_dir)
             result.steps_completed.append("extract")
@@ -174,7 +174,7 @@ class FirmwareOrchestrator:
             raise FirmwareError(f"Extraction failed: {exc}") from exc
 
         # Step 3: Apply debloat
-        if self._choices.debloat_enabled:
+        if self._choices.remove_telemetry or self._choices.remove_auto_updater:
             step("debloat", "Removing bloatware...")
             try:
                 engine = DebloatEngine(self._paths.rootfs_dir, runner=self._runner)
@@ -198,7 +198,7 @@ class FirmwareOrchestrator:
             step("debloat", "Skipped (not selected)")
 
         # Step 4: Install media suite
-        if self._choices.media_enabled:
+        if any([self._choices.install_airplay, self._choices.install_dlna, self._choices.install_spotify, self._choices.install_snapcast]):
             step("media", "Installing media suite...")
             try:
                 installer = MediaSuiteInstaller(
@@ -225,7 +225,7 @@ class FirmwareOrchestrator:
             step("media", "Skipped (not selected)")
 
         # Step 5: Install AI brain
-        if self._choices.ai_enabled:
+        if self._choices.ai_mode != "none":
             step("ai_brain", f"Installing AI brain ({self._choices.ai_mode})...")
             try:
                 installer = AIBrainInstaller(

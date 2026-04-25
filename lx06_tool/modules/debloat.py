@@ -33,7 +33,7 @@ from lx06_tool.constants import (
     OTA_PACKAGES,
 )
 from lx06_tool.exceptions import FirmwareError
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -110,21 +110,21 @@ class DebloatEngine:
             )
 
         # Step 2: Disable OTA updates
-        if choices.remove_ota:
+        if choices.remove_auto_updater:
             await self._remove_ota(
                 result=result,
                 on_output=on_output,
             )
 
         # Step 3: Remove stock voice engine (optional, aggressive)
-        if choices.remove_xiaoai:
+        if choices.remove_xiaoai_voice:
             await self._remove_xiaoai(
                 result=result,
                 on_output=on_output,
             )
 
         # Step 4: Clean up binaries
-        if choices.remove_telemetry or choices.remove_ota:
+        if choices.remove_telemetry or choices.remove_auto_updater:
             await self._remove_binaries(
                 BLOAT_BINARIES,
                 result=result,
@@ -132,7 +132,7 @@ class DebloatEngine:
             )
 
         # Step 5: Clean up configs
-        if choices.remove_telemetry or choices.remove_ota:
+        if choices.remove_telemetry or choices.remove_auto_updater:
             await self._remove_configs(
                 BLOAT_CONFIGS,
                 result=result,

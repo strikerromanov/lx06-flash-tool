@@ -1,154 +1,94 @@
 """
-Checksum utilities for LX06 Flash Tool.
-
-Provides SHA256 and MD5 hashing for firmware backup verification.
-All operations are synchronous (CPU-bound, not I/O-bound) and
-run on the default executor when called from async code.
+lx06_tool/utils/checksum.py
+----------------------------
+Async-friendly file hashing (SHA256 + MD5) with progress reporting.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
-
-from lx06_tool.constants import CHECKSUM_BUFFER_SIZE
-from lx06_tool.exceptions import ChecksumMismatchError
-
-logger = logging.getLogger(__name__)
+from typing import Optional, Callable
 
 
-def compute_sha256(file_path: Path, progress_cb: Callable[[int], None] | None = None) -> str:
-    """Compute the SHA256 hash of a file.
+_CHUNK = 1024 * 1024  # 1 MB read chunks
 
-    Args:
-        file_path: Path to the file to hash.
-        progress_cb: Optional callback invoked with bytes processed so far.
 
-    Returns:
-        Hex-encoded SHA256 digest string.
+@dataclass
+class FileChecksums:
+    path: Path
+    sha256: str
+    md5: str
+    size_bytes: int
 
-    Raises:
-        FileNotFoundError: If file_path does not exist.
+
+async def hash_file(
+    path: Path,
+    *,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> FileChecksums:
     """
-    return _compute_hash(file_path, "sha256", progress_cb)
+    Compute SHA-256 and MD5 of a file asynchronously (runs in executor
+    to avoid blocking the event loop on large partition dumps).
 
-
-def compute_md5(file_path: Path, progress_cb: Callable[[int], None] | None = None) -> str:
-    """Compute the MD5 hash of a file.
-
-    Args:
-        file_path: Path to the file to hash.
-        progress_cb: Optional callback invoked with bytes processed so far.
-
-    Returns:
-        Hex-encoded MD5 digest string.
+    Parameters
+    ----------
+    on_progress : Called with (bytes_read, total_bytes) periodically.
     """
-    return _compute_hash(file_path, "md5", progress_cb)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _hash_sync, path, on_progress)
 
 
-def verify_checksum(
-    file_path: Path,
-    expected_sha256: str | None = None,
-    expected_md5: str | None = None,
-    partition_name: str = "",
-) -> dict[str, bool]:
-    """Verify a file's checksums against expected values.
+def _hash_sync(
+    path: Path,
+    on_progress: Optional[Callable[[int, int], None]],
+) -> FileChecksums:
+    sha256 = hashlib.sha256()
+    md5    = hashlib.md5()
+    total  = path.stat().st_size
+    read   = 0
 
-    Args:
-        file_path: Path to the file to verify.
-        expected_sha256: Expected SHA256 hex digest. None to skip SHA256 check.
-        expected_md5: Expected MD5 hex digest. None to skip MD5 check.
-        partition_name: Partition name for error messages.
+    with open(path, "rb") as fh:
+        while chunk := fh.read(_CHUNK):
+            sha256.update(chunk)
+            md5.update(chunk)
+            read += len(chunk)
+            if on_progress:
+                on_progress(read, total)
 
-    Returns:
-        Dict with keys "sha256" and/or "md5" mapping to bool pass/fail.
-        Only includes keys for checksums that were checked.
+    return FileChecksums(
+        path=path,
+        sha256=sha256.hexdigest(),
+        md5=md5.hexdigest(),
+        size_bytes=total,
+    )
 
-    Raises:
-        ChecksumMismatchError: If any checksum doesn't match (strict mode).
+
+async def verify_file(
+    path: Path,
+    expected_sha256: str,
+    *,
+    expected_md5: Optional[str] = None,
+) -> bool:
     """
-    results: dict[str, bool] = {}
-
-    if expected_sha256:
-        actual = compute_sha256(file_path)
-        passed = actual == expected_sha256.lower()
-        results["sha256"] = passed
-        if not passed:
-            logger.warning(
-                "SHA256 mismatch for %s (%s): expected %s, got %s",
-                file_path.name, partition_name, expected_sha256[:16], actual[:16],
-            )
-
-    if expected_md5:
-        actual = compute_md5(file_path)
-        passed = actual == expected_md5.lower()
-        results["md5"] = passed
-        if not passed:
-            logger.warning(
-                "MD5 mismatch for %s (%s): expected %s, got %s",
-                file_path.name, partition_name, expected_md5[:16], actual[:16],
-            )
-
-    return results
-
-
-def verify_file_size(file_path: Path, expected_size: int, partition_name: str = "") -> bool:
-    """Verify a file's size matches an expected value.
-
-    Args:
-        file_path: Path to the file to check.
-        expected_size: Expected file size in bytes.
-        partition_name: Partition name for error messages.
-
-    Returns:
-        True if the file size matches.
+    Hash a file and compare against expected checksums.
+    Returns True if all provided checksums match.
     """
-    actual_size = file_path.stat().st_size
-    if actual_size != expected_size:
-        logger.warning(
-            "Size mismatch for %s (%s): expected %d bytes, got %d bytes",
-            file_path.name, partition_name, expected_size, actual_size,
-        )
-        return False
-    return True
+    checksums = await hash_file(path)
+    sha_ok = checksums.sha256.lower() == expected_sha256.lower()
+    md5_ok = (
+        checksums.md5.lower() == expected_md5.lower()
+        if expected_md5 else True
+    )
+    return sha_ok and md5_ok
 
 
-def _compute_hash(
-    file_path: Path,
-    algorithm: str,
-    progress_cb: Callable[[int], None] | None = None,
-) -> str:
-    """Core hash computation with buffered reading.
-
-    Args:
-        file_path: File to hash.
-        algorithm: Hash algorithm name ("sha256", "md5", etc.).
-        progress_cb: Optional callback with cumulative bytes read.
-
-    Returns:
-        Hex-encoded hash digest.
-    """
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    hasher = hashlib.new(algorithm)
-    bytes_processed = 0
-
-    with open(file_path, "rb") as f:
-        while True:
-            chunk = f.read(CHECKSUM_BUFFER_SIZE)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            bytes_processed += len(chunk)
-            if progress_cb:
-                try:
-                    progress_cb(bytes_processed)
-                except Exception:
-                    pass
-
-    digest = hasher.hexdigest()
-    logger.debug("%s(%s) = %s...", algorithm, file_path.name, digest[:16])
-    return digest
+def write_checksum_file(checksums: FileChecksums, dest: Path) -> None:
+    """Write a <sha256>  <filename> style checksum file alongside the dump."""
+    dest.write_text(
+        f"SHA256: {checksums.sha256}  {checksums.path.name}\n"
+        f"MD5:    {checksums.md5}  {checksums.path.name}\n",
+        encoding="utf-8",
+    )

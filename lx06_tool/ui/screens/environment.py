@@ -12,6 +12,15 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Markdown, RichLog, Static
 
 from lx06_tool.app import LX06App
+from lx06_tool.modules.environment import (
+    OSInfo,
+    DependencyStatus,
+    detect_os,
+    check_dependencies,
+    install_dependencies,
+    verify_docker,
+    install_udev_rules,
+)
 from lx06_tool.ui.widgets.copy_log import CopyLogMixin
 
 logger = logging.getLogger(__name__)
@@ -57,14 +66,14 @@ class EnvironmentScreen(CopyLogMixin, Screen):
         yield Markdown("## Phase 1: Environment Setup\nChecking your system for required dependencies...")
         yield RichLog(id="env-log", highlight=True, markup=True)
         with Horizontal(id="sudo-row"):
-            yield Static("🔒 Sudo Password:")
+            yield Static("\U0001f512 Sudo Password:")
             yield Input(
                 placeholder="Enter your sudo password...",
                 password=True,
                 id="sudo-input",
             )
         with Vertical(id="env-actions"):
-            yield Button("📋 Copy Log", variant="default", id="copy-btn")
+            yield Button("\U0001f4cb Copy Log", variant="default", id="copy-btn")
             yield Button("Check Environment", variant="primary", id="check-btn")
             yield Button("Install Missing", variant="warning", id="install-btn", disabled=True)
             yield Button("Download Tools", variant="primary", id="download-btn", disabled=True)
@@ -100,7 +109,7 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             self.app.run_worker(self._go_next())
 
     async def _run_check(self) -> None:
-        """Run environment dependency check."""
+        """Run environment dependency check using standalone functions."""
         self.check_started = True
         log = self.query_one(RichLog)
         log.clear()
@@ -112,37 +121,71 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             return
 
         try:
-            mgr = app.get_env_manager(sudo_password=self._get_sudo_password())
-            tools_dir = Path(app.config.tools_dir)
-            report = await mgr.check(tools_dir=tools_dir)
+            # Step 1: Detect OS
+            os_info = detect_os()
+            app.os_info = os_info
+            log.write(f"\n[bold]OS:[/] {os_info.name} {os_info.version}")
+            log.write(f"[bold]Family:[/] {os_info.family}")
+            log.write(f"[bold]Package Manager:[/] {os_info.pkg_manager}")
+            if os_info.aur_helper:
+                log.write(f"[bold]AUR Helper:[/] {os_info.aur_helper}")
 
-            log.write(f"\n[bold]OS:[/] {report.os_info.name} {report.os_info.version}")
-            log.write(f"[bold]Package Manager:[/] {report.pkg_manager or 'Not found'}")
+            # Step 2: Check dependencies
+            deps = check_dependencies(os_info)
+            app.dep_statuses = deps
+            missing = [d for d in deps if not d.installed]
+            installed = [d for d in deps if d.installed]
 
-            if report.missing_packages:
-                log.write(f"\n[bold yellow]Missing packages:[/]")
-                for pkg in report.missing_packages:
-                    log.write(f"  - {pkg}")
+            log.write(f"\n[bold]Dependencies:[/] {len(installed)} installed, {len(missing)} missing")
+
+            if missing:
+                log.write("\n[bold yellow]Missing packages:[/]")
+                for d in missing:
+                    log.write(f"  \u2717 {d.package_name} ({d.logical_name})")
+                    if d.notes:
+                        for note_line in d.notes.split("\n"):
+                            log.write(f"    [dim]{note_line}[/]")
                 self.query_one("#install-btn", Button).disabled = False
             else:
                 log.write("\n[bold green]All dependencies satisfied![/]")
                 self.query_one("#install-btn", Button).disabled = True
 
-            if report.docker_available:
-                log.write("\n[green]Docker: OK[/]")
-            else:
-                log.write("\n[yellow]Docker: Not available (needed for isolated builds)[/]")
+            if installed:
+                log.write("\n[green]Installed:[/]")
+                for d in installed:
+                    log.write(f"  \u2713 {d.package_name} ({d.logical_name})")
 
-            if report.aml_tool_installed:
-                log.write(f"\n[green]AML Tool: OK[/] ({report.aml_tool_path})")
+            # Step 3: Check Docker
+            try:
+                await verify_docker(os_info)
+                app.docker_ok = True
+                log.write("\n[green]Docker: OK[/]")
+            except Exception as e:
+                app.docker_ok = False
+                log.write(f"\n[yellow]Docker: {e}[/]")
+
+            # Step 4: Check AML tool
+            tools_dir = Path(app.config.tools_dir)
+            aml_path = tools_dir / "aml-flash-tool" / "update"
+            # Also check common locations
+            if not aml_path.exists():
+                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
+            if not aml_path.exists():
+                # Check config path
+                aml_path = app.config.update_exe_path
+
+            if aml_path and Path(aml_path).exists():
+                log.write(f"\n[green]AML Tool: OK[/] ({aml_path})")
+                app.config.update_exe_path = Path(aml_path)
                 self.tools_downloaded = True
             else:
                 log.write("\n[yellow]AML Tool: Not downloaded yet[/]")
                 self.query_one("#download-btn", Button).disabled = False
 
             # Enable continue only when everything is ready
-            can_continue = report.all_ready or (
-                len(report.missing_packages) == 0 and self.tools_downloaded
+            can_continue = (
+                len(missing) == 0
+                and self.tools_downloaded
             )
             self.query_one("#continue-btn", Button).disabled = not can_continue
 
@@ -154,42 +197,48 @@ class EnvironmentScreen(CopyLogMixin, Screen):
             logger.error("Environment check failed: %s", exc, exc_info=True)
 
     async def _run_install(self) -> None:
-        """Install missing dependencies using sudo password."""
+        """Install missing dependencies using the new standalone functions."""
         log = self.query_one(RichLog)
-        sudo_pass = self._get_sudo_password()
 
-        if not sudo_pass:
-            log.write("\n[bold red]Please enter your sudo password above first![/]")
-            return
-
-        log.write("\n[bold blue]Installing missing dependencies (using sudo)...[/]")
         app = self.app
         if not isinstance(app, LX06App):
             return
 
-        try:
-            mgr = app.get_env_manager(sudo_password=sudo_pass)
-            report = await mgr.check()
+        os_info = app.os_info
+        if os_info is None:
+            log.write("\n[red]Run 'Check Environment' first![/]")
+            return
 
-            if report.missing_packages:
-                await mgr.install_dependencies(
-                    report.pkg_manager,
-                    report.missing_packages,
-                    on_output=lambda lvl, line: log.write(line),
-                )
-                log.write("\n[green]Dependencies installed.[/]")
+        # Get missing deps
+        missing = [d for d in app.dep_statuses if not d.installed]
+        if not missing:
+            log.write("\n[green]No missing packages to install.[/]")
+            return
+
+        log.write(f"\n[bold blue]Installing {len(missing)} missing packages...[/]")
+        for d in missing:
+            log.write(f"  Installing: {d.package_name}")
+
+        try:
+            await install_dependencies(missing, os_info)
+            log.write("\n[green]Dependencies installed successfully.[/]")
+            self.install_complete = True
 
             # Re-check
-            report = await mgr.check()
-            if report.all_ready or len(report.missing_packages) == 0:
+            deps = check_dependencies(os_info)
+            app.dep_statuses = deps
+            still_missing = [d for d in deps if not d.installed]
+
+            if not still_missing:
                 log.write("\n[bold green]All dependencies now satisfied![/]")
                 self.query_one("#install-btn", Button).disabled = True
                 if self.tools_downloaded:
                     self.query_one("#continue-btn", Button).disabled = False
             else:
-                log.write("\n[yellow]Some dependencies still missing.[/]")
+                log.write(f"\n[yellow]{len(still_missing)} packages still missing:[/]")
+                for d in still_missing:
+                    log.write(f"  \u2717 {d.package_name}")
 
-            self.install_complete = True
             app.update_status("Installation complete")
 
         except Exception as exc:
@@ -199,45 +248,56 @@ class EnvironmentScreen(CopyLogMixin, Screen):
     async def _run_download_tools(self) -> None:
         """Download aml-flash-tool from Radxa."""
         log = self.query_one(RichLog)
-        log.write("\n[bold blue]Downloading aml-flash-tool...[/]")
         app = self.app
+
         if not isinstance(app, LX06App):
             return
 
+        log.write("\n[bold blue]Downloading aml-flash-tool...[/]")
+
         try:
-            mgr = app.get_env_manager(sudo_password=self._get_sudo_password())
+            from lx06_tool.utils.downloader import AsyncDownloader
+            from lx06_tool.constants import AML_FLASH_TOOL_REPO, UPDATE_EXE_RELPATH
+
             tools_dir = Path(app.config.tools_dir)
+            tools_dir.mkdir(parents=True, exist_ok=True)
+            aml_dir = tools_dir / "aml-flash-tool"
 
-            update_path = await mgr.download_aml_tool(
-                tools_dir,
-                on_output=lambda lvl, line: log.write(line),
-            )
+            if not aml_dir.exists():
+                log.write(f"  Cloning {AML_FLASH_TOOL_REPO}...")
+                await AsyncDownloader.clone_git_repo(
+                    AML_FLASH_TOOL_REPO, str(aml_dir)
+                )
+                log.write("  [green]Clone complete.[/]")
+            else:
+                log.write("  [dim]AML tool directory already exists, skipping clone.[/]")
 
-            # Save the path to app config so other modules can find it
-            app.config.update_exe_path = str(update_path)
-            log.write(f"\n[green]AML tool downloaded to: {update_path}[/]")
-
-            # Re-check to verify
-            report = await mgr.check(tools_dir=tools_dir)
-            if report.aml_tool_installed:
-                log.write("[bold green]AML Tool: Verified OK[/]")
+            # Verify the binary exists
+            update_bin = aml_dir / UPDATE_EXE_RELPATH
+            if update_bin.exists():
+                update_bin.chmod(0o755)
+                app.config.update_exe_path = update_bin
+                app.config.save()
+                log.write(f"  [green]AML tool ready:[/] {update_bin}")
                 self.tools_downloaded = True
                 self.query_one("#download-btn", Button).disabled = True
 
-                # Enable continue if deps are also met
-                if not report.missing_packages:
+                # Enable continue if all deps are met
+                missing = [d for d in app.dep_statuses if not d.installed]
+                if not missing:
                     self.query_one("#continue-btn", Button).disabled = False
             else:
-                log.write("[yellow]AML tool downloaded but not detected in re-check.[/]")
+                log.write(f"  [yellow]Warning: Binary not found at {update_bin}[/]")
+                log.write("  [dim]You may need to build it manually.[/]")
 
-            app.update_status("Tools downloaded")
+            app.update_status("Tool download complete")
 
         except Exception as exc:
             log.write(f"\n[bold red]Download error:[/] {exc}")
-            logger.error("Tool download failed: %s", exc, exc_info=True)
+            logger.error("Download failed: %s", exc, exc_info=True)
 
     async def _go_next(self) -> None:
-        """Proceed to USB connection screen."""
+        """Proceed to the next screen."""
         app = self.app
         if isinstance(app, LX06App):
-            await app.on_environment_done(True)
+            await app.on_environment_done(self.check_complete and self.tools_downloaded)

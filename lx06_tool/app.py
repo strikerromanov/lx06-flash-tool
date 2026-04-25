@@ -4,23 +4,24 @@ Orchestrates the complete workflow through a series of screens:
   Welcome -> Environment -> USB Connect -> Backup -> Customize -> Build -> Flash -> Complete
 
 Each screen drives one or more backend modules and reports progress
-through shared callbacks. The app holds all module instances and
+through shared callbacks. The app holds module instances and
 passes them to screens as needed.
 
 Usage:
-    lx06                    # Launch the TUI
-    lx06 --check            # Run environment check only
-    lx06 --backup-only      # Only dump partitions (no flash)
+    lx06-tool                # Launch the TUI
+    lx06-tool --check        # Run environment check only
+    lx06-tool --backup-only  # Only dump partitions (no flash)
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -37,23 +38,24 @@ from lx06_tool.config import (
     AppConfig,
     CustomizationChoices,
     LX06Device,
-    load_config,
-    save_config,
 )
 from lx06_tool.state import StateMachine
-from lx06_tool.modules.backup import BackupManager
-from lx06_tool.modules.bootloader import BootloaderManager
-from lx06_tool.modules.debloat import DebloatEngine
-from lx06_tool.modules.docker_builder import DockerBuilder
-from lx06_tool.modules.environment import EnvironmentManager
-from lx06_tool.modules.flasher import Flasher, FlashResult
-from lx06_tool.modules.firmware import FirmwareOrchestrator
-from lx06_tool.modules.media_suite import MediaSuiteInstaller
-from lx06_tool.modules.usb_scanner import USBScanner
 from lx06_tool.utils.amlogic import AmlogicTool
-from lx06_tool.utils.runner import AsyncRunner
 
 logger = logging.getLogger(__name__)
+
+
+# ── Flash Result (used by complete screen) ──────────────────────────────────
+
+@dataclass
+class FlashResult:
+    """Result of the flash operation."""
+    success: bool = False
+    boot_flashed: bool = False
+    system_flashed: bool = False
+    verified: bool = False
+    duration_sec: float = 0.0
+    errors: list[str] = field(default_factory=list)
 
 
 APP_CSS = """
@@ -136,23 +138,21 @@ class LX06App(App):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._config = load_config()
+        self._config = AppConfig.load()
         self._state_machine = StateMachine()
-        self._runner = AsyncRunner(default_timeout=120.0, sudo=True)
 
         # Module instances (initialized lazily)
-        self._env_manager: EnvironmentManager | None = None
-        self._usb_scanner: USBScanner | None = None
         self._aml_tool: AmlogicTool | None = None
-        self._bootloader_mgr: BootloaderManager | None = None
-        self._backup_mgr: BackupManager | None = None
-        self._firmware_pipeline: FirmwareOrchestrator | None = None
-        self._flasher: Flasher | None = None
 
         # Runtime state
         self._device: LX06Device | None = None
         self._choices = CustomizationChoices()
         self._flash_result: FlashResult | None = None
+
+        # Environment state (populated by environment screen)
+        self._os_info: Any | None = None  # OSInfo from detect_os()
+        self._dep_statuses: list[Any] = []  # list[DependencyStatus]
+        self._docker_ok: bool = False
 
         self._screens_loaded = False
 
@@ -247,7 +247,7 @@ class LX06App(App):
         except Exception:
             pass
 
-    # ── Module Accessors ──────────────────────────────────────────────────────
+    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def config(self) -> AppConfig:
@@ -277,61 +277,64 @@ class LX06App(App):
     def flash_result(self, value: FlashResult) -> None:
         self._flash_result = value
 
-    def get_env_manager(self, sudo_password: str | None = None) -> EnvironmentManager:
-        self._env_manager = EnvironmentManager(sudo_password=sudo_password)
-        return self._env_manager
+    @property
+    def os_info(self) -> Any | None:
+        return self._os_info
 
-    def get_usb_scanner(self) -> USBScanner:
-        if self._usb_scanner is None:
-            self._usb_scanner = USBScanner(aml_tool=self.get_aml_tool())
-        return self._usb_scanner
+    @os_info.setter
+    def os_info(self, value: Any) -> None:
+        self._os_info = value
+
+    @property
+    def dep_statuses(self) -> list[Any]:
+        return self._dep_statuses
+
+    @dep_statuses.setter
+    def dep_statuses(self, value: list[Any]) -> None:
+        self._dep_statuses = value
+
+    @property
+    def docker_ok(self) -> bool:
+        return self._docker_ok
+
+    @docker_ok.setter
+    def docker_ok(self, value: bool) -> None:
+        self._docker_ok = value
+
+    # ── Module Accessors ──────────────────────────────────────────────────────
 
     def get_aml_tool(self) -> AmlogicTool:
+        """Get or create the AmlogicTool instance."""
         if self._aml_tool is None:
             aml_path = self._config.update_exe_path
             if not aml_path or not Path(aml_path).exists():
                 aml_path = Path("/usr/local/bin/aml-flash-tool/update")
-            self._aml_tool = AmlogicTool(update_exe_path=aml_path)
+            self._aml_tool = AmlogicTool(update_exe=aml_path)
         return self._aml_tool
 
-    def get_bootloader_mgr(self) -> BootloaderManager:
-        if self._bootloader_mgr is None:
-            self._bootloader_mgr = BootloaderManager(aml_tool=self.get_aml_tool())
-        return self._bootloader_mgr
+    def get_firmware_pipeline(self) -> Any:
+        """Get the firmware build pipeline.
 
-    def get_backup_mgr(self) -> BackupManager:
-        if self._backup_mgr is None:
-            self._backup_mgr = BackupManager(
-                aml_tool=self.get_aml_tool(),
-                backup_dir=self._config.backup_dir,
-            )
-        return self._backup_mgr
+        Note: FirmwareOrchestrator is not part of the reviewed module set.
+        This accessor provides a compatibility shim.
+        """
+        from lx06_tool.modules.firmware import FirmwareOrchestrator, FirmwarePaths
 
-    def get_firmware_pipeline(self) -> FirmwareOrchestrator:
-        if self._firmware_pipeline is None:
-            from lx06_tool.modules.firmware import FirmwarePaths
-            build_dir = self._config.build_dir
-            backup_dir = self._config.backup_dir
-            paths = FirmwarePaths(
-                system_dump=backup_dir / "mtd4.img",
-                boot_dump=backup_dir / "mtd2.img",
-                extract_dir=build_dir / "extracted",
-                rootfs_dir=build_dir / "extracted" / "squashfs-root",
-                output_dir=build_dir / "output",
-                output_system=build_dir / "output" / "root.squashfs",
-                output_boot=build_dir / "output" / "boot.img",
-            )
-            self._firmware_pipeline = FirmwareOrchestrator(
-                paths=paths,
-                choices=self._choices,
-                runner=self._runner,
-            )
-        return self._firmware_pipeline
-
-    def get_flasher(self) -> Flasher:
-        if self._flasher is None:
-            self._flasher = Flasher(aml_tool=self.get_aml_tool())
-        return self._flasher
+        build_dir = self._config.build_dir
+        backup_dir = self._config.backup_dir
+        paths = FirmwarePaths(
+            system_dump=backup_dir / "mtd4_system0.img",
+            boot_dump=backup_dir / "mtd2_boot0.img",
+            extract_dir=build_dir / "extracted",
+            rootfs_dir=build_dir / "extracted" / "squashfs-root",
+            output_dir=build_dir / "output",
+            output_system=build_dir / "output" / "root.squashfs",
+            output_boot=build_dir / "output" / "boot.img",
+        )
+        return FirmwareOrchestrator(
+            paths=paths,
+            choices=self._choices,
+        )
 
     # ── Global Progress ───────────────────────────────────────────────────────
 
@@ -408,7 +411,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="lx06",
+        prog="lx06-tool",
         description="LX06 Flash Tool — Xiaomi Xiaoai Speaker Pro Custom Firmware Installer",
     )
     parser.add_argument(
@@ -438,16 +441,43 @@ def main() -> None:
     )
 
     if args.check:
-        # Non-interactive environment check
+        # Non-interactive environment check using new standalone functions
         import asyncio as _aio
+        from lx06_tool.modules.environment import (
+            detect_os,
+            check_dependencies,
+            verify_docker,
+        )
 
-        async def _check():
-            mgr = EnvironmentManager()
-            report = await mgr.check()
-            print(report.to_table())
-            if not report.ready:
-                print("Environment not ready. Run with -v for details.")
-            return report.ready
+        async def _check() -> bool:
+            try:
+                os_info = detect_os()
+                print(f"OS: {os_info.name} ({os_info.id})")
+                print(f"Family: {os_info.family}")
+                print(f"Package Manager: {os_info.pkg_manager}")
+
+                deps = check_dependencies(os_info)
+                missing = [d for d in deps if not d.installed]
+
+                print(f"\nDependencies checked: {len(deps)}")
+                if missing:
+                    print(f"Missing packages:")
+                    for d in missing:
+                        print(f"  - {d.package_name} ({d.logical_name})")
+                else:
+                    print("All dependencies satisfied.")
+
+                try:
+                    await verify_docker(os_info)
+                    print("Docker: OK")
+                except Exception as e:
+                    print(f"Docker: {e}")
+
+                return len(missing) == 0
+
+            except Exception as exc:
+                print(f"Error: {exc}")
+                return False
 
         success = _aio.run(_check())
         raise SystemExit(0 if success else 1)

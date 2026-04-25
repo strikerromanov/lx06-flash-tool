@@ -25,7 +25,7 @@ from lx06_tool.exceptions import (
     BackupError,
 )
 from lx06_tool.utils.amlogic import AmlogicTool
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 

@@ -28,7 +28,7 @@ from typing import Callable
 
 from lx06_tool.config import CustomizationChoices
 from lx06_tool.exceptions import FirmwareError
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 

@@ -1,582 +1,406 @@
 """
-Host environment setup module for LX06 Flash Tool (Phase 1).
+lx06_tool/modules/environment.py
+---------------------------------
+Phase 1: Host environment detection and dependency installation.
 
-Handles:
-- Host OS detection (Debian/Ubuntu, Fedora/RHEL, Arch/Manjaro)
-- Package manager auto-detection (apt, dnf, pacman)
-- Dependency checking and installation
-- Docker availability verification
-- aml-flash-tool download and setup
-
-All operations are async to keep the TUI responsive.
+CachyOS notes
+─────────────
+• CachyOS reports ID=cachyos or ID=arch in /etc/os-release, with ID_LIKE=arch.
+• Package manager: pacman (base). AUR helpers paru/yay are preferred for AUR pkgs.
+• Python is 'python', not 'python3'. venv is built-in — no separate package needed.
+• Docker daemon is not auto-started; user must be in the 'docker' group.
+• libusb-compat provides the libusb-0.1 ABI that Amlogic's update binary needs.
+• PEP 668 applies: pip into system Python is blocked — always use a venv.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import platform
 import shutil
-from dataclasses import dataclass, field
+import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Optional
 
-from lx06_tool.constants import (
-    AML_FLASH_TOOL_REPO,
-    AML_FLASH_TOOL_VERSION,
-    SUPPORTED_PACKAGE_MANAGERS,
-)
+from lx06_tool.constants import DISTRO_PACKAGES, OS_FAMILY_MAP, OS_LIKE_MAP
 from lx06_tool.exceptions import (
-    DockerNotAvailableError,
-    EnvironmentError,
-    PackageNotFoundError,
-    PermissionDeniedError,
-    UnsupportedOSError,
+    DependencyInstallError,
+    DependencyMissingError,
+    DockerNotRunningError,
+    HostEnvironmentError,
+    UnsupportedDistroError,
 )
-from lx06_tool.utils.runner import AsyncRunner, CommandResult
-from lx06_tool.utils.downloader import AsyncDownloader
-
-logger = logging.getLogger(__name__)
+from lx06_tool.utils.runner import RunResult, run
 
 
-# ── Data Models ─────────────────────────────────────────────────────────────
-
+# ─── Data Classes ─────────────────────────────────────────────────────────────
 
 @dataclass
 class OSInfo:
-    """Detected host operating system information."""
-
-    id: str = ""                # e.g. "ubuntu", "fedora", "arch"
-    id_like: str = ""           # e.g. "debian", "rhel", "arch"
-    name: str = ""              # e.g. "Ubuntu 24.04 LTS"
-    version: str = ""           # e.g. "24.04"
-    version_codename: str = ""  # e.g. "noble"
-    arch: str = ""              # e.g. "x86_64", "aarch64"
-    kernel: str = ""            # e.g. "6.5.0-44-generic"
-
-
-@dataclass
-class PackageStatus:
-    """Status of a single system dependency."""
-
-    name: str                  # Generic name (e.g. "git")
-    package_name: str          # Disto-specific name (e.g. "git")
-    installed: bool = False
-    version: str = ""
-
-
-@dataclass
-class EnvironmentReport:
-    """Complete environment check report.
-
-    Returned by EnvironmentManager.check() to give a full picture
-    of the host's readiness for LX06 flashing.
-    """
-
-    os_info: OSInfo = field(default_factory=OSInfo)
-    pkg_manager: str = ""          # "apt", "dnf", or "pacman"
-    packages: list[PackageStatus] = field(default_factory=list)
-    docker_available: bool = False
-    docker_user_perm: bool = False  # User in docker group
-    aml_tool_installed: bool = False
-    aml_tool_path: str = ""
-    all_ready: bool = False
-    missing_packages: list[str] = field(default_factory=list)
+    """Detected host OS information."""
+    name: str           # Pretty name from /etc/os-release
+    id: str             # ID field (e.g. "arch", "cachyos", "ubuntu")
+    id_like: str        # ID_LIKE field (e.g. "arch", "debian")
+    version: str        # VERSION_ID (may be empty on rolling distros)
+    family: str         # Normalised: "arch" | "debian" | "fedora"
+    pkg_manager: str    # "pacman" | "apt" | "dnf"
+    aur_helper: Optional[str] = None  # "paru" | "yay" | None (Arch only)
 
     @property
-    def summary(self) -> str:
-        """Human-readable one-line summary."""
-        parts = [f"OS: {self.os_info.name or 'unknown'}"]
-        parts.append(f"PM: {self.pkg_manager or 'none'}")
-        if self.missing_packages:
-            parts.append(f"Missing: {len(self.missing_packages)} pkgs")
-        else:
-            parts.append("All deps installed")
-        parts.append(f"Docker: {'✓' if self.docker_available else '✗'}")
-        parts.append(f"AML tool: {'✓' if self.aml_tool_installed else '✗'}")
-        return " | ".join(parts)
+    def is_arch_family(self) -> bool:
+        return self.family == "arch"
 
+    @property
+    def is_cachyos(self) -> bool:
+        return "cachyos" in self.id.lower()
 
-# ── Environment Manager ────────────────────────────────────────────────────
-
-
-class EnvironmentManager:
-    """Manages host environment detection, dependency installation, and tool setup.
-
-    Usage:
-        mgr = EnvironmentManager(config)
-        report = await mgr.check()
-        if report.missing_packages:
-            await mgr.install_dependencies(report, on_output=ui_callback)
-        if not report.aml_tool_installed:
-            await mgr.download_aml_tool(tools_dir, on_output=ui_callback)
-    """
-
-    # Required dependencies mapped by generic name
-    REQUIRED_DEPS = ["libusb", "git", "squashfs_tools", "docker"]
-
-    def __init__(
-        self,
-        runner: AsyncRunner | None = None,
-        downloader: AsyncDownloader | None = None,
-        sudo_password: str | None = None,
-    ):
-        self._runner = runner or AsyncRunner(default_timeout=60.0, sudo=True, sudo_password=sudo_password)
-        self._downloader = downloader or AsyncDownloader()
-        self._sudo_password = sudo_password
-
-    # ── OS Detection ─────────────────────────────────────────────────────────
-
-    async def detect_os(self) -> OSInfo:
-        """Detect the host operating system.
-
-        Reads /etc/os-release for distro information and uname for kernel/arch.
-
-        Returns:
-            OSInfo with detected system details.
-
-        Raises:
-            UnsupportedOSError: If the OS cannot be identified.
-        """
-        info = OSInfo(
-            arch=platform.machine(),
-            kernel=platform.release(),
-        )
-
-        # Try /etc/os-release first (standard across modern Linux)
-        os_release = Path("/etc/os-release")
-        if os_release.exists():
-            parsed = self._parse_os_release(os_release)
-            info.id = parsed.get("ID", "").strip('"')
-            info.id_like = parsed.get("ID_LIKE", "").strip('"')
-            info.name = parsed.get("PRETTY_NAME", "").strip('"')
-            info.version = parsed.get("VERSION_ID", "").strip('"')
-            info.version_codename = parsed.get("VERSION_CODENAME", "").strip('"')
-        else:
-            # Fallback: try lsb_release
-            try:
-                result = await self._runner.run(["lsb_release", "-a"], timeout=5)
-                if result.success:
-                    for line in result.stdout.splitlines():
-                        if "Distributor ID:" in line:
-                            info.id = line.split(":", 1)[1].strip().lower()
-                        elif "Description:" in line:
-                            info.name = line.split(":", 1)[1].strip()
-                        elif "Release:" in line:
-                            info.version = line.split(":", 1)[1].strip()
-                        elif "Codename:" in line:
-                            info.version_codename = line.split(":", 1)[1].strip()
-            except Exception:
-                pass
-
-        logger.info(
-            "Detected OS: %s (id=%s, arch=%s, kernel=%s)",
-            info.name, info.id, info.arch, info.kernel,
-        )
-        return info
-
-    async def detect_package_manager(self, os_info: OSInfo | None = None) -> str:
-        """Detect the system package manager.
-
-        Checks for apt, dnf, or pacman on the system, matching against
-        known distro-to-PM mappings.
-
-        Returns:
-            Package manager name: "apt", "dnf", or "pacman".
-
-        Raises:
-            UnsupportedOSError: If no supported package manager is found.
-        """
-        for pm_name, pm_config in SUPPORTED_PACKAGE_MANAGERS.items():
-            for detect_path in pm_config["detect"]:
-                if Path(detect_path).exists():
-                    logger.info("Detected package manager: %s (via %s)", pm_name, detect_path)
-                    return pm_name
-
-        raise UnsupportedOSError(
-            f"No supported package manager found. "
-            f"Supported: {list(SUPPORTED_PACKAGE_MANAGERS.keys())}",
-            details="This tool requires apt, dnf, or pacman.",
-        )
-
-    # ── Dependency Checks ────────────────────────────────────────────────────
-
-    async def check_dependency(self, dep_name: str, pkg_manager: str) -> PackageStatus:
-        """Check if a single dependency is installed.
-
-        Args:
-            dep_name: Generic dependency name (e.g. "git").
-            pkg_manager: Package manager to look up distro-specific package name.
-
-        Returns:
-            PackageStatus with installation state.
-        """
-        pm_config = SUPPORTED_PACKAGE_MANAGERS.get(pkg_manager, {})
-        packages = pm_config.get("packages", {})
-        package_name = packages.get(dep_name, dep_name)
-
-        status = PackageStatus(name=dep_name, package_name=package_name)
-
-        # Check if the binary/command is available
-        binary_map = {
-            "libusb": None,         # Library, not a binary — check via pkg-config or ldconfig
-            "git": "git",
-            "squashfs_tools": "mksquashfs",
-            "docker": "docker",
+    @property
+    def install_cmd_prefix(self) -> list[str]:
+        """Returns the base install command (without package names)."""
+        cmds = {
+            "pacman": ["sudo", "pacman", "-S", "--noconfirm", "--needed"],
+            "apt":    ["sudo", "apt-get", "install", "-y"],
+            "dnf":    ["sudo", "dnf", "install", "-y"],
         }
+        return cmds[self.pkg_manager]
 
-        binary = binary_map.get(dep_name)
-        if binary:
-            found = shutil.which(binary)
-            if found:
-                status.installed = True
-                # Try to get version
-                try:
-                    ver_result = await self._runner.run(
-                        [binary, "--version"], timeout=5, sudo=False,
-                    )
-                    if ver_result.success:
-                        # Take first line of version output
-                        status.version = ver_result.stdout.splitlines()[0].strip()[:80]
-                except Exception:
-                    pass
-        elif dep_name == "libusb":
-            # Check for libusb via ldconfig or pkg-config
-            try:
-                result = await self._runner.run(
-                    ["ldconfig", "-p"], timeout=5, sudo=False,
+    @property
+    def aur_install_cmd_prefix(self) -> list[str]:
+        """Returns the AUR install command prefix (Arch only)."""
+        if self.aur_helper:
+            return [self.aur_helper, "-S", "--noconfirm", "--needed"]
+        return ["sudo", "pacman", "-S", "--noconfirm", "--needed"]
+
+
+@dataclass
+class DependencyStatus:
+    """Result of checking a single dependency."""
+    logical_name: str          # e.g. "squashfs_tools"
+    package_name: str          # e.g. "squashfs-tools"
+    installed: bool = False
+    binary: str = ""           # Binary to look for in PATH (empty = skip check)
+    notes: str = ""
+
+
+# ─── OS Detection ─────────────────────────────────────────────────────────────
+
+def detect_os() -> OSInfo:
+    """
+    Parse /etc/os-release to determine the Linux distribution and family.
+
+    Raises UnsupportedDistroError for non-Linux or unknown distros.
+    """
+    if platform.system() != "Linux":
+        raise UnsupportedDistroError(
+            f"This tool only runs on Linux. Detected: {platform.system()}"
+        )
+
+    os_release = _parse_os_release()
+
+    raw_id     = os_release.get("ID", "").strip('"').lower()
+    raw_like   = os_release.get("ID_LIKE", "").strip('"').lower()
+    name       = os_release.get("PRETTY_NAME", raw_id).strip('"')
+    version    = os_release.get("VERSION_ID", "").strip('"')
+
+    family = _resolve_family(raw_id, raw_like)
+    if family is None:
+        raise UnsupportedDistroError(
+            f"Unsupported distribution: {name!r} (ID={raw_id!r}, ID_LIKE={raw_like!r}). "
+            "Supported families: Debian/Ubuntu, Fedora/RHEL, Arch/CachyOS."
+        )
+
+    pkg_manager = _family_to_pm(family)
+    aur_helper  = _detect_aur_helper() if family == "arch" else None
+
+    return OSInfo(
+        name=name,
+        id=raw_id,
+        id_like=raw_like,
+        version=version,
+        family=family,
+        pkg_manager=pkg_manager,
+        aur_helper=aur_helper,
+    )
+
+
+def _parse_os_release() -> dict[str, str]:
+    candidates = [Path("/etc/os-release"), Path("/usr/lib/os-release")]
+    for path in candidates:
+        if path.exists():
+            result: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    result[k.strip()] = v.strip().strip('"')
+            return result
+    return {}
+
+
+def _resolve_family(raw_id: str, raw_like: str) -> Optional[str]:
+    # 1. Direct ID match
+    if raw_id in OS_FAMILY_MAP:
+        return OS_FAMILY_MAP[raw_id]
+
+    # 2. ID_LIKE match — ID_LIKE can be space-separated list
+    for like_token in raw_like.split():
+        if like_token in OS_LIKE_MAP:
+            return OS_LIKE_MAP[like_token]
+
+    # 3. Substring fallback (e.g. "cachyos" contains "arch" implicitly)
+    for key, family in OS_FAMILY_MAP.items():
+        if key in raw_id:
+            return family
+
+    return None
+
+
+def _family_to_pm(family: str) -> str:
+    return {"arch": "pacman", "debian": "apt", "fedora": "dnf"}[family]
+
+
+def _detect_aur_helper() -> Optional[str]:
+    """Check for paru or yay AUR helpers (Arch family only)."""
+    for helper in ("paru", "yay"):
+        if shutil.which(helper):
+            return helper
+    return None
+
+
+# ─── Dependency Checking ──────────────────────────────────────────────────────
+
+# Which binaries to probe for each logical dependency
+_DEPENDENCY_BINARIES: dict[str, str] = {
+    "git":            "git",
+    "squashfs_tools": "unsquashfs",
+    "docker":         "docker",
+}
+
+
+def check_dependencies(os_info: OSInfo) -> list[DependencyStatus]:
+    """
+    Check which required packages are installed on the host.
+
+    Returns a list of DependencyStatus objects.
+    """
+    pkg_table = DISTRO_PACKAGES[os_info.family]
+    results: list[DependencyStatus] = []
+
+    logical_deps = ["git", "libusb", "squashfs_tools", "docker"]
+
+    for dep in logical_deps:
+        pkg_name = pkg_table.get(dep)
+        if pkg_name is None:
+            # Package not needed on this distro (e.g. python3_venv on Arch)
+            continue
+
+        binary = _DEPENDENCY_BINARIES.get(dep, "")
+        installed = _is_installed(dep, pkg_name, binary, os_info)
+        notes = _dep_notes(dep, os_info)
+
+        results.append(DependencyStatus(
+            logical_name=dep,
+            package_name=pkg_name,
+            installed=installed,
+            binary=binary,
+            notes=notes,
+        ))
+
+    return results
+
+
+def _is_installed(
+    logical: str,
+    pkg_name: str,
+    binary: str,
+    os_info: OSInfo,
+) -> bool:
+    # For tools with a known binary, check PATH first (fastest)
+    if binary and shutil.which(binary):
+        return True
+
+    # Fall back to package-manager query
+    try:
+        if os_info.pkg_manager == "pacman":
+            r = subprocess.run(
+                ["pacman", "-Q", pkg_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.returncode == 0
+
+        elif os_info.pkg_manager == "apt":
+            r = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Status}", pkg_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "install ok installed" in r.stdout
+
+        elif os_info.pkg_manager == "dnf":
+            r = subprocess.run(
+                ["rpm", "-q", pkg_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.returncode == 0
+
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return False
+
+
+def _dep_notes(logical: str, os_info: OSInfo) -> str:
+    notes: dict[str, str] = {}
+    if os_info.is_arch_family:
+        notes = {
+            "libusb": (
+                "libusb-compat provides the libusb-0.1 ABI needed by "
+                "Amlogic's update binary."
+            ),
+            "docker": (
+                "After install, enable and start the daemon:\n"
+                "  sudo systemctl enable --now docker\n"
+                "Then add yourself to the docker group:\n"
+                "  sudo usermod -aG docker $USER\n"
+                "(Log out and back in for this to take effect.)"
+            ),
+        }
+    return notes.get(logical, "")
+
+
+# ─── Dependency Installation ───────────────────────────────────────────────────
+
+async def install_dependencies(
+    missing: list[DependencyStatus],
+    os_info: OSInfo,
+) -> None:
+    """
+    Install all missing packages via the host package manager.
+
+    Raises DependencyInstallError on failure.
+    """
+    if not missing:
+        return
+
+    pkg_names = [d.package_name for d in missing]
+
+    if os_info.pkg_manager == "apt":
+        await _run_install(["sudo", "apt-get", "update", "-q"])
+
+    cmd = os_info.install_cmd_prefix + pkg_names
+    result = await run(cmd, timeout=300)
+    if result.returncode != 0:
+        raise DependencyInstallError(
+            f"Package installation failed (exit {result.returncode}):\n"
+            f"{result.stderr or result.stdout}"
+        )
+
+
+async def _run_install(cmd: list[str], timeout: int = 120) -> None:
+    result = await run(cmd, timeout=timeout)
+    if result.returncode != 0:
+        raise DependencyInstallError(
+            f"Command {' '.join(cmd)} failed: {result.stderr}"
+        )
+
+
+# ─── Docker Readiness ─────────────────────────────────────────────────────────
+
+async def verify_docker(os_info: OSInfo) -> None:
+    """
+    Verify Docker is installed, the daemon is running, and the current user
+    can communicate with it (no permission error).
+
+    Raises DockerNotRunningError with actionable advice.
+    """
+    if not shutil.which("docker"):
+        raise DockerNotRunningError(
+            "Docker binary not found in PATH. Install docker via your package manager."
+        )
+
+    result = await run(["docker", "info"], timeout=10)
+    if result.returncode != 0:
+        stderr = result.stderr.lower()
+
+        if "permission denied" in stderr or "connect: no such file" in stderr:
+            if os_info.is_arch_family:
+                advice = (
+                    "Start the Docker daemon and add your user to the docker group:\n\n"
+                    "  sudo systemctl enable --now docker\n"
+                    "  sudo usermod -aG docker $USER\n\n"
+                    "Then log out and back in (or run: newgrp docker)."
                 )
-                if result.success and "libusb" in result.stdout:
-                    status.installed = True
-            except Exception:
-                # Fallback: check if the shared lib file exists
-                for lib_path in ["/usr/lib/x86_64-linux-gnu/libusb-0.1.so.4",
-                                  "/usr/lib64/libusb-0.1.so.4",
-                                  "/usr/lib/libusb-0.1.so.4"]:
-                    if Path(lib_path).exists():
-                        status.installed = True
-                        break
-
-        logger.debug(
-            "Dependency %s (%s): %s",
-            dep_name, package_name, "installed" if status.installed else "MISSING",
-        )
-        return status
-
-    async def check_all_dependencies(self, pkg_manager: str) -> list[PackageStatus]:
-        """Check all required dependencies.
-
-        Args:
-            pkg_manager: Detected package manager name.
-
-        Returns:
-            List of PackageStatus for all required dependencies.
-        """
-        statuses = []
-        for dep in self.REQUIRED_DEPS:
-            status = await self.check_dependency(dep, pkg_manager)
-            statuses.append(status)
-        return statuses
-
-    # ── Docker Verification ──────────────────────────────────────────────────
-
-    async def verify_docker(self) -> tuple[bool, bool]:
-        """Verify Docker daemon is running and user has permissions.
-
-        Returns:
-            Tuple of (daemon_running, user_has_permissions).
-        """
-        daemon_running = False
-        user_has_perm = False
-
-        # Check if docker binary exists
-        if not shutil.which("docker"):
-            return False, False
-
-        # Check daemon
-        result = await self._runner.run(
-            ["docker", "info"], timeout=10, sudo=False,
-        )
-        if result.success:
-            daemon_running = True
-            user_has_perm = True
-        else:
-            # Try with sudo
-            result_sudo = await self._runner.run(
-                ["docker", "info"], timeout=10, sudo=True,
-            )
-            if result_sudo.success:
-                daemon_running = True
-                user_has_perm = False
-                logger.warning(
-                    "Docker daemon is running but user lacks permissions. "
-                    "Consider: sudo usermod -aG docker $USER"
+            else:
+                advice = (
+                    "Start the Docker daemon:\n"
+                    "  sudo systemctl start docker\n\n"
+                    "Or add your user to the docker group:\n"
+                    "  sudo usermod -aG docker $USER"
                 )
-
-        return daemon_running, user_has_perm
-
-    # ── Installation ─────────────────────────────────────────────────────────
-
-    async def install_dependencies(
-        self,
-        pkg_manager: str,
-        packages: list[str] | None = None,
-        *,
-        on_output: Callable[[str, str], None] | None = None,
-    ) -> CommandResult:
-        """Install missing system dependencies.
-
-        Args:
-            pkg_manager: Package manager to use (apt/dnf/pacman).
-            packages: Specific package generic names to install. None = all missing.
-            on_output: Callback for real-time output lines.
-
-        Returns:
-            CommandResult from the package manager.
-
-        Raises:
-            EnvironmentError: If the package manager fails.
-        """
-        pm_config = SUPPORTED_PACKAGE_MANAGERS.get(pkg_manager)
-        if not pm_config:
-            raise UnsupportedOSError(f"Unknown package manager: {pkg_manager}")
-
-        # Resolve generic names to distro-specific package names
-        target_pkgs = packages or self.REQUIRED_DEPS
-        pkg_names = []
-        for dep in target_pkgs:
-            name = pm_config["packages"].get(dep, dep)
-            if name:
-                pkg_names.append(name)
-
-        if not pkg_names:
-            logger.info("No packages to install")
-            return CommandResult(command=["echo", "nothing to install"], returncode=0)
-
-        # Update package index first
-        update_cmd = pm_config["update_cmd"]
-        logger.info("Updating package index: %s", update_cmd)
-        await self._runner.run(
-            update_cmd.split(),
-            timeout=120,
-            on_output=on_output,
-            sudo=True,
-        )
-
-        # Install packages
-        install_cmd = pm_config["install_cmd"].split()
-        full_cmd = [*install_cmd, *pkg_names]
-
-        logger.info("Installing packages: %s", " ".join(pkg_names))
-        result = await self._runner.run(
-            full_cmd,
-            timeout=300,
-            on_output=on_output,
-            sudo=True,
-        )
-
-        if not result.success:
-            raise EnvironmentError(
-                f"Failed to install packages: {' '.join(pkg_names)}",
-                details=result.stderr[:500],
+            raise DockerNotRunningError(
+                f"Cannot connect to Docker daemon.\n{advice}"
             )
 
-        logger.info("Successfully installed: %s", " ".join(pkg_names))
-        return result
-
-    # ── aml-flash-tool Download ──────────────────────────────────────────────
-
-    async def download_aml_tool(
-        self,
-        tools_dir: Path,
-        *,
-        on_output: Callable[[str, str], None] | None = None,
-        on_progress: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        """Download and set up aml-flash-tool from Radxa.
-
-        Clones the repository and locates the update binary.
-
-        Args:
-            tools_dir: Directory to install tools into.
-            on_output: Callback for real-time output lines.
-            on_progress: Callback for download progress (bytes_done, bytes_total).
-
-        Returns:
-            Path to the update binary.
-
-        Raises:
-            EnvironmentError: If download or setup fails.
-        """
-        tools_dir.mkdir(parents=True, exist_ok=True)
-        aml_dir = tools_dir / "aml-flash-tool"
-
-        logger.info("Downloading aml-flash-tool → %s", aml_dir)
-
-        if on_output:
-            on_output("stdout", f"Cloning {AML_FLASH_TOOL_REPO}...")
-
-        try:
-            await AsyncDownloader.clone_git_repo(
-                repo_url=AML_FLASH_TOOL_REPO,
-                dest_dir=aml_dir,
-                branch=AML_FLASH_TOOL_VERSION,
-            )
-        except Exception as exc:
-            raise EnvironmentError(
-                f"Failed to download aml-flash-tool: {exc}",
-                details="Check internet connection and GitHub availability.",
-            ) from exc
-
-        # Locate the update binary
-        update_exe = await self._find_update_binary(aml_dir)
-        if not update_exe:
-            raise EnvironmentError(
-                f"Could not find 'update' binary in {aml_dir}",
-                details="The aml-flash-tool repo structure may have changed.",
-            )
-
-        # Make it executable
-        update_exe.chmod(0o755)
-
-        logger.info("aml-flash-tool ready: %s", update_exe)
-        if on_output:
-            on_output("stdout", f"aml-flash-tool installed: {update_exe}")
-
-        return update_exe
-
-    async def _find_update_binary(self, aml_dir: Path) -> Path | None:
-        """Search for the update binary in the aml-flash-tool directory.
-
-        The binary may be at different locations depending on the repo version:
-        - aml-flash-tool/update
-        - aml-flash-tool/bin/update
-        - aml-flash-tool/build/update
-        """
-        candidates = [
-            aml_dir / "update",
-            aml_dir / "bin" / "update",
-            aml_dir / "build" / "update",
-            aml_dir / "aml-flash-tool" / "update",  # If cloned into subfolder
-        ]
-
-        for candidate in candidates:
-            if candidate.exists() and candidate.is_file():
-                logger.debug("Found update binary: %s", candidate)
-                return candidate
-
-        # Fallback: search recursively
-        for p in aml_dir.rglob("update"):
-            if p.is_file() and not p.name.endswith(".py"):
-                # Verify it's an ELF binary
-                try:
-                    with open(p, "rb") as f:
-                        magic = f.read(4)
-                    if magic == b"\x7fELF":
-                        logger.debug("Found update binary (recursive): %s", p)
-                        return p
-                except Exception:
-                    continue
-
-        return None
-
-    # ── Full Environment Check ───────────────────────────────────────────────
-
-    async def check(self, tools_dir: Path | None = None) -> EnvironmentReport:
-        """Perform a complete environment readiness check.
-
-        Checks OS, package manager, all dependencies, Docker, and aml-flash-tool.
-
-        Args:
-            tools_dir: Directory where aml-flash-tool should be installed.
-
-        Returns:
-            EnvironmentReport with full status.
-        """
-        report = EnvironmentReport()
-
-        # Detect OS
-        try:
-            report.os_info = await self.detect_os()
-        except Exception as exc:
-            logger.error("OS detection failed: %s", exc)
-            report.os_info = OSInfo(arch=platform.machine(), kernel=platform.release())
-
-        # Detect package manager
-        try:
-            report.pkg_manager = await self.detect_package_manager(report.os_info)
-        except UnsupportedOSError as exc:
-            logger.error("Package manager detection failed: %s", exc)
-            report.all_ready = False
-            return report
-
-        # Check dependencies
-        report.packages = await self.check_all_dependencies(report.pkg_manager)
-        report.missing_packages = [
-            p.name for p in report.packages if not p.installed
-        ]
-
-        # Check Docker
-        report.docker_available, report.docker_user_perm = await self.verify_docker()
-
-        # Check aml-flash-tool
-        if tools_dir:
-            update_exe = await self._find_update_binary(tools_dir / "aml-flash-tool")
-            if update_exe:
-                report.aml_tool_installed = True
-                report.aml_tool_path = str(update_exe)
-
-        # Determine overall readiness
-        report.all_ready = (
-            len(report.missing_packages) == 0
-            and report.docker_available
-            and report.aml_tool_installed
+        raise DockerNotRunningError(
+            f"Docker is not working correctly:\n{result.stderr}"
         )
 
-        logger.info("Environment check: %s", report.summary)
-        return report
 
-    # ── Setup Helpers ────────────────────────────────────────────────────────
+# ─── udev Rules ───────────────────────────────────────────────────────────────
 
-    async def setup_docker_permissions(self) -> None:
-        """Add current user to the docker group.
+async def install_udev_rules(rules_content: str, dest: str) -> None:
+    """
+    Write the Amlogic USB udev rule and reload the rule set.
 
-        Requires sudo. The user must log out/in for this to take effect.
-        """
-        user = os.environ.get("USER", "root")
-        if user == "root":
-            logger.debug("Running as root, Docker permissions already available")
-            return
+    Works on all systemd-based distros (Arch, Ubuntu, Fedora).
+    """
+    dest_path = Path(dest)
 
-        logger.info("Adding user '%s' to docker group...", user)
-        result = await self._runner.run(
-            ["usermod", "-aG", "docker", user],
-            sudo=True,
-        )
-        if result.success:
-            logger.info(
-                "User added to docker group. Log out and back in for this to take effect."
+    # Write the rules file
+    write_result = await run(
+        ["sudo", "bash", "-c", f"cat > {dest_path}"],
+        stdin_data=rules_content,
+        timeout=10,
+    )
+    if write_result.returncode != 0:
+        from lx06_tool.exceptions import UdevRulesError
+        raise UdevRulesError(f"Failed to write udev rules to {dest_path}")
+
+    # Reload and trigger — same on all modern systemd distros
+    for cmd in (
+        ["sudo", "udevadm", "control", "--reload-rules"],
+        ["sudo", "udevadm", "trigger", "--subsystem-match=usb"],
+    ):
+        result = await run(cmd, timeout=15)
+        if result.returncode != 0:
+            from lx06_tool.exceptions import UdevRulesError
+            raise UdevRulesError(
+                f"udevadm command failed: {' '.join(cmd)}\n{result.stderr}"
             )
-        else:
-            logger.warning("Failed to add user to docker group: %s", result.stderr)
 
-    # ── Parsing Helpers ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def _parse_os_release(path: Path) -> dict[str, str]:
-        """Parse /etc/os-release into a key-value dict.
+# ─── Python Environment ───────────────────────────────────────────────────────
 
-        Handles quoted and unquoted values.
-        """
-        data: dict[str, str] = {}
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        key, _, value = line.partition("=")
-                        data[key.strip()] = value.strip().strip('"')
-        except Exception as exc:
-            logger.warning("Failed to parse %s: %s", path, exc)
-        return data
+def check_python_version(min_major: int = 3, min_minor: int = 10) -> None:
+    """Raise if the running Python is too old."""
+    v = sys.version_info
+    if (v.major, v.minor) < (min_major, min_minor):
+        raise HostEnvironmentError(
+            f"Python {min_major}.{min_minor}+ is required. "
+            f"Running: {v.major}.{v.minor}.{v.micro}"
+        )
+
+
+def is_pep668_managed() -> bool:
+    """
+    Return True if the current Python is externally managed (PEP 668).
+    Relevant on Arch/CachyOS where system pip is blocked.
+    """
+    marker = Path(sys.prefix) / "EXTERNALLY-MANAGED"
+    return marker.exists()
+
+
+def check_venv() -> bool:
+    """Return True if running inside a virtual environment."""
+    return sys.prefix != sys.base_prefix or os.environ.get("VIRTUAL_ENV") is not None

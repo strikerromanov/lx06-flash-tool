@@ -7,8 +7,7 @@ from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Markdown, Static
 
-from lx06_tool.app import LX06App
-from lx06_tool.modules.flasher import FlashResult
+from lx06_tool.app import LX06App, FlashResult
 
 
 class CompleteScreen(Screen):
@@ -90,7 +89,7 @@ If the new firmware doesn't work:
                 system="Flashed" if result.system_flashed else "Failed",
                 verify="Passed" if result.verified else "Unverified",
                 duration=result.duration_sec,
-                backup_dir="./backups/" if isinstance(app, LX06App) else "./backups/",
+                backup_dir=str(app.config.backup_dir) if isinstance(app, LX06App) else "./backups/",
             )
         else:
             md_text = """
@@ -113,7 +112,7 @@ Your device should still boot from the **original active partition**,
 so it is not bricked. The backup files are preserved in `{backup_dir}`.
 """.format(
                 errors="\n".join(f"- {e}" for e in (result.errors if result else ["Unknown error"])),
-                backup_dir="./backups/" if isinstance(app, LX06App) else "./backups/",
+                backup_dir=str(app.config.backup_dir) if isinstance(app, LX06App) else "./backups/",
             )
 
         content.mount(Markdown(md_text))

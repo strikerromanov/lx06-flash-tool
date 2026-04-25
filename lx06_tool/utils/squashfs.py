@@ -25,7 +25,7 @@ from lx06_tool.exceptions import (
     SquashFSRepackError,
     InvalidFirmwareError,
 )
-from lx06_tool.utils.runner import AsyncRunner, CommandResult
+from lx06_tool.utils.compat import AsyncRunner, CommandResult
 
 logger = logging.getLogger(__name__)
 

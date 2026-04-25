@@ -12,6 +12,11 @@ from textual.widgets import Button, Markdown, RichLog
 
 from lx06_tool.app import LX06App
 from lx06_tool.config import LX06Device
+from lx06_tool.modules.usb_scanner import (
+    handshake_loop,
+    install_udev_rules,
+    udev_rules_installed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +34,7 @@ USB_INSTRUCTIONS = """## USB Connection
 
 The tool will automatically detect the device during the handshake window.
 
-⚠️ If detection fails, try again — timing is critical (2-second window).
+\u26a0\ufe0f If detection fails, try again — timing is critical (2-second window).
 """
 
 
@@ -64,7 +69,7 @@ class USBConnectScreen(Screen):
             self.query_one("#cancel-btn", Button).disabled = True
 
     async def _start_scan(self) -> None:
-        """Start the USB handshake loop."""
+        """Start the USB handshake loop using new standalone functions."""
         self.scanning = True
         self.query_one("#scan-btn", Button).disabled = True
         self.query_one("#cancel-btn", Button).disabled = False
@@ -77,37 +82,55 @@ class USBConnectScreen(Screen):
         log.write("[bold blue]Starting USB handshake scan...[/]")
         log.write("Waiting for device in USB burning mode...")
 
-        async def on_status(msg: str) -> None:
-            log.write(f"  {msg}")
-
         try:
-            scanner = app.get_usb_scanner()
+            # Step 1: Install udev rules if not already installed
+            if not udev_rules_installed():
+                log.write("[dim]Installing udev rules...[/]")
+                await install_udev_rules()
+                log.write("[green]udev rules installed.[/]")
+            else:
+                log.write("[dim]udev rules already installed.[/]")
 
-            # Install udev rules first
-            log.write("[dim]Installing udev rules...[/]")
-            await scanner.install_udev_rules(on_status=on_status)
+            # Step 2: Get AmlogicTool and start handshake
+            tool = app.get_aml_tool()
 
-            # Start handshake loop
-            device = await scanner.wait_for_device(
-                on_status=on_status,
-                on_output=lambda s, l: log.write(f"  [{s}] {l}"),
+            def on_attempt(attempt: int, elapsed: int) -> None:
+                if attempt % 10 == 1:  # Log every ~1 second
+                    log.write(f"  [dim]Attempt {attempt} ({elapsed}s elapsed)...[/]")
+
+            log.write("[bold]Polling for device (120s timeout)...[/]")
+            device_info = await handshake_loop(
+                tool,
+                timeout=120,
+                on_attempt=on_attempt,
             )
 
-            if device:
-                log.write(f"\n[bold green]Device detected![/]")
-                log.write(f"  Chip ID: {device.chip_id or 'N/A'}")
-                log.write(f"  Serial: {device.serial or 'N/A'}")
-                app.update_status("Device connected!")
-                app.device = device
-                await app.on_usb_connected(device)
-            else:
-                log.write("\n[yellow]Scan cancelled or timed out.[/]")
-                self.query_one("#scan-btn", Button).disabled = False
-                self.query_one("#cancel-btn", Button).disabled = True
+            # Device detected!
+            log.write("\n[bold green]Device detected![/]")
+            log.write(f"  Chip: {device_info.chip or 'N/A'}")
+            log.write(f"  Serial: {device_info.serial or 'N/A'}")
+            log.write(f"  Firmware: {device_info.firmware_version or 'N/A'}")
+
+            # Create LX06Device and store in app
+            device = LX06Device(
+                connected=True,
+                serial=device_info.serial,
+                chip_id=device_info.chip,
+                firmware_version=device_info.firmware_version,
+            )
+
+            app.update_status("Device connected!")
+            app.device = device
+            await app.on_usb_connected(device)
 
         except Exception as exc:
-            log.write(f"\n[bold red]Error:[/] {exc}")
-            logger.error("USB scan failed: %s", exc, exc_info=True)
+            if "not identified" in str(exc).lower() or "timeout" in str(exc).lower():
+                log.write(f"\n[yellow]Device not detected within timeout.[/]")
+                log.write("[dim]Power-cycle the speaker and try again.[/]")
+            else:
+                log.write(f"\n[bold red]Error:[/] {exc}")
+                logger.error("USB scan failed: %s", exc, exc_info=True)
+
             self.query_one("#scan-btn", Button).disabled = False
             self.query_one("#cancel-btn", Button).disabled = True
 

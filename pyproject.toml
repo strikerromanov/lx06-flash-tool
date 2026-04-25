@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=68.0"]
+# Removed setuptools-scm — no git tags exist; dynamic versioning would break fresh clones.
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -22,25 +23,30 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Hardware :: Hardware Drivers",
 ]
+
 dependencies = [
-    "textual>=0.40.0",
-    "rich>=13.0.0",
-    "pyyaml>=6.0",
-    "docker>=6.0",
-    "jinja2>=3.1",
-    "httpx>=0.24",
-    "aiofiles>=23.0",
+    "textual>=0.47.0",       # Minimum version with stable Screen.dismiss()
+    "rich>=13.7.0",
+    "pyyaml>=6.0.1",
+    "docker>=7.0.0",         # Python Docker SDK v7 removed deprecated APIs
+    "jinja2>=3.1.3",
+    "httpx>=0.27.0",
+    "aiofiles>=23.2.1",
+    "platformdirs>=4.2.0",   # XDG-compliant config/data/cache paths (new dep)
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-    "textual-dev>=0.20",
-    "mypy>=1.0",
-    "ruff>=0.1",
+    "pytest-asyncio>=0.23",
+    "textual-dev>=0.47.0",
+    "mypy>=1.9",
+    "ruff>=0.4",
+    "types-PyYAML>=6.0",
+    "types-aiofiles>=23.2",
 ]
 
 [project.scripts]
@@ -54,11 +60,16 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+ignore = [
+    "N818",   # Exception names don't need to end in 'Error' everywhere
+]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
+warn_return_any = true
+warn_unused_configs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

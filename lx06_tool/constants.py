@@ -1,293 +1,264 @@
 """
-Constants for LX06 Flash Tool.
+lx06_tool/constants.py
+----------------------
+Hardware constants, partition maps, USB identifiers, download URLs,
+and per-distro package name tables.
 
-Partition maps, USB identifiers, download URLs, and default configuration values.
-All magic numbers and device-specific knowledge live here.
+CachyOS is Arch-based: uses pacman, optionally paru/yay for AUR.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 from typing import Final
 
-# ── Application ─────────────────────────────────────────────────────────────
+# ─── USB / Amlogic ────────────────────────────────────────────────────────────
 
-APP_NAME: Final = "LX06 Flash Tool"
-APP_VERSION: Final = "0.1.0"
-DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "lx06-tool"
-DEFAULT_CONFIG_FILE: Final = DEFAULT_CONFIG_DIR / "config.yaml"
-DEFAULT_LOG_DIR: Final = Path.home() / ".local" / "share" / "lx06-tool" / "logs"
+# Amlogic SoC USB burning mode identifiers
+AMLOGIC_USB_VENDOR_ID:  Final[str] = "1b8e"
+AMLOGIC_USB_PRODUCT_ID: Final[str] = "c003"
 
-# ── LX06 Device Info ────────────────────────────────────────────────────────
+# The LX06 uses the Amlogic AXG (A113X) SoC
+LX06_CHIP: Final[str] = "AXG"
 
-DEVICE_MODEL: Final = "LX06"
-DEVICE_NAME: Final = "Xiaoai Speaker Pro"
-DEVICE_MANUFACTURER: Final = "Xiaomi"
-DEVICE_SOC: Final = "Amlogic AXG"  # A113X
+# udev rule line — identifies the Amlogic bootloader USB mode
+UDEV_RULE_LINE: Final[str] = (
+    'SUBSYSTEM=="usb", '
+    f'ATTR{{idVendor}}=="{AMLOGIC_USB_VENDOR_ID}", '
+    f'ATTR{{idProduct}}=="{AMLOGIC_USB_PRODUCT_ID}", '
+    'MODE="0666", GROUP="plugdev"'
+)
 
-# ── Partition Map ───────────────────────────────────────────────────────────
-# LX06 uses an MTD-based flash layout with A/B partitioning for OTA updates.
-# System partitions (system0/system1) are squashfs; boot partitions are raw images.
+# Handshake polling parameters
+HANDSHAKE_POLL_INTERVAL_S: Final[float] = 0.1   # 100 ms
+HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120    # 2 minutes
 
-PARTITION_MAP: Final[dict[str, dict[str, str | int]]] = {
-    "mtd0": {"label": "bootloader", "size": 0x100000,   "desc": "U-Boot bootloader"},
-    "mtd1": {"label": "tpl",        "size": 0x200000,   "desc": "TPL (Secondary Program Loader)"},
-    "mtd2": {"label": "boot0",      "size": 0x800000,   "desc": "Boot partition A (kernel + dtb)"},
-    "mtd3": {"label": "boot1",      "size": 0x800000,   "desc": "Boot partition B (kernel + dtb)"},
-    "mtd4": {"label": "system0",    "size": 0x2000000,  "desc": "Root filesystem A (squashfs)"},
-    "mtd5": {"label": "system1",    "size": 0x2000000,  "desc": "Root filesystem B (squashfs)"},
-    "mtd6": {"label": "data",       "size": 0x800000,   "desc": "User data / overlay"},
+# ─── Partition Map ────────────────────────────────────────────────────────────
+
+# LX06 NAND partition layout (Amlogic AXG platform).
+# mtd device → label, expected size in bytes.
+PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
+    "mtd0": {"label": "bootloader", "size": 0x100000},   #  1 MB
+    "mtd1": {"label": "tpl",        "size": 0x200000},   #  2 MB
+    "mtd2": {"label": "boot0",      "size": 0x800000},   #  8 MB
+    "mtd3": {"label": "boot1",      "size": 0x800000},   #  8 MB
+    "mtd4": {"label": "system0",    "size": 0x2000000},  # 32 MB — SquashFS rootfs A
+    "mtd5": {"label": "system1",    "size": 0x2000000},  # 32 MB — SquashFS rootfs B
+    "mtd6": {"label": "data",       "size": 0x800000},   #  8 MB
 }
 
-# Total partitions to dump for full backup
-PARTITION_ORDER: Final[list[str]] = ["mtd0", "mtd1", "mtd2", "mtd3", "mtd4", "mtd5", "mtd6"]
+# Which partitions form the A/B slot pairs
+AB_BOOT_SLOTS:   Final[tuple[str, str]] = ("boot0",   "boot1")
+AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
 
-# A/B partition pairing
-AB_PARTITION_PAIRS: Final[dict[str, str]] = {
-    "boot0": "boot1",
-    "boot1": "boot0",
-    "system0": "system1",
-    "system1": "system0",
-}
+# Partitions that are read-only references (bootloader / tpl) — never flash these
+READ_ONLY_PARTITIONS: Final[frozenset[str]] = frozenset({"bootloader", "tpl"})
 
-# MTD index to label mapping
-MTD_TO_LABEL: Final[dict[str, str]] = {
-    mtd: info["label"] for mtd, info in PARTITION_MAP.items()
-}
+# ─── aml-flash-tool / update.exe ─────────────────────────────────────────────
 
-LABEL_TO_MTD: Final[dict[str, str]] = {
-    info["label"]: mtd for mtd, info in PARTITION_MAP.items()
-}
+AML_FLASH_TOOL_REPO: Final[str] = "https://github.com/radxa/aml-flash-tool.git"
+AML_FLASH_TOOL_DIR:  Final[str] = "aml-flash-tool"
 
-# ── USB Identifiers ─────────────────────────────────────────────────────────
-# Amlogic USB vendor/product IDs for burning mode
+# Relative path inside the cloned repo to the Linux x86-64 binary
+UPDATE_EXE_RELPATH: Final[str] = "tools/linux-x86/update"
 
-AML_USB_VENDOR_ID: Final = "1b8e"
-AML_USB_PRODUCT_ID: Final = "c003"
+# udev rules file from the Radxa repo (Ubuntu 14 era, but the rule content is fine)
+AML_UDEV_RULES_RELPATH: Final[str] = "tools/_install_/70-persistent-usb-ubuntu14.rules"
 
-# udev rules content for automatic USB detection
-UDEV_RULES_FILENAME: Final = "70-persistent-usb-ubuntu14.rules"
-UDEV_RULES_CONTENT: Final = """# Amlogic USB Burning Mode - LX06 Flash Tool
-SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1b8e\", ATTR{idProduct}==\"c003\", MODE=\"0666\"
-"""
+# Where we install our own udev rule
+UDEV_RULES_DEST: Final[str] = "/etc/udev/rules.d/70-lx06-amlogic.rules"
 
-# ── Handshake Timing ────────────────────────────────────────────────────────
-# The LX06 bootloader enters USB burning mode for ~2 seconds after power-on
-# when the appropriate test pads are shorted. We poll at this interval.
+# ─── Paths & Directories ─────────────────────────────────────────────────────
 
-HANDSHAKE_POLL_INTERVAL_SEC: Final = 0.1    # 100ms
-HANDSHAKE_TIMEOUT_SEC: Final = 120          # 2 minutes total timeout
-HANDSHAKE_BOOTLOADER_WINDOW_SEC: Final = 2  # The bootloader's USB window duration
+# Application identifier used for config/data/cache dirs (XDG)
+APP_NAME: Final[str] = "lx06-tool"
 
-# ── Download URLs ───────────────────────────────────────────────────────────
-# aml-flash-tool from Radxa (contains update.exe)
+# Default subdirectory names (resolved at runtime relative to XDG dirs)
+BACKUP_SUBDIR:  Final[str] = "backups"
+BUILD_SUBDIR:   Final[str] = "build"
+TOOLS_SUBDIR:   Final[str] = "tools"
 
-AML_FLASH_TOOL_REPO: Final = "https://github.com/radxa/aml-flash-tool"
-AML_FLASH_TOOL_VERSION: Final = "master"  # Branch or tag
+# Docker image used for isolated squashfs builds
+DOCKER_BUILD_IMAGE: Final[str] = "lx06-firmware-builder:latest"
 
-# Reference repositories
-XIAOAI_PATCH_REPO: Final = "https://github.com/duhow/xiaoai-patch"
-xiaogpt_REPO: Final = "https://github.com/yihong0618/xiaogpt"
-OPEN_XIAOAI_REPO: Final = "https://github.com/idootop/open-xiaoai"
-
-# ── Supported Package Managers ──────────────────────────────────────────────
-
-SUPPORTED_PACKAGE_MANAGERS: Final[dict[str, dict[str, str]]] = {
-    "apt": {
-        "detect": ["/usr/bin/apt", "/usr/bin/apt-get"],
-        "install_cmd": "apt-get install -y",
-        "update_cmd": "apt-get update",
-        "packages": {
-            "libusb": "libusb-0.1-4",
-            "git": "git",
-            "squashfs_tools": "squashfs-tools",
-            "docker": "docker.io",
-        },
-        "distros": ["debian", "ubuntu", "pop", "mint", "elementary", "kali"],
+# ─── Per-Distro Package Tables ────────────────────────────────────────────────
+#
+# Structure:
+#   DISTRO_PACKAGES[family][logical_name] = "exact-package-name"
+#
+# Families:
+#   "debian"  → apt  (Debian, Ubuntu, Raspberry Pi OS, …)
+#   "fedora"  → dnf  (Fedora, RHEL, CentOS Stream, …)
+#   "arch"    → pacman (Arch Linux, CachyOS, Manjaro, EndeavourOS, …)
+#
+# Notes for Arch/CachyOS:
+#   - squashfs-tools      → pacman (core)
+#   - libusb-compat       → pacman (extra) — provides libusb-0.1 ABI
+#   - docker              → pacman (extra) — requires manual daemon start
+#   - docker-buildx       → pacman (extra) — needed for multi-arch builds
+#   - base-devel          → needed to build AUR packages / compile tools
+#
+DISTRO_PACKAGES: Final[dict[str, dict[str, str]]] = {
+    "debian": {
+        "git":            "git",
+        "libusb":         "libusb-0.1-4",
+        "squashfs_tools": "squashfs-tools",
+        "docker":         "docker.io",
+        "docker_compose": "docker-compose-plugin",
+        "base_devel":     "build-essential",
+        "python3":        "python3",
+        "python3_venv":   "python3-venv",
     },
-    "dnf": {
-        "detect": ["/usr/bin/dnf"],
-        "install_cmd": "dnf install -y",
-        "update_cmd": "dnf check-update",
-        "packages": {
-            "libusb": "libusb",
-            "git": "git",
-            "squashfs_tools": "squashfs-tools",
-            "docker": "docker",
-        },
-        "distros": ["fedora", "rhel", "centos", "rocky", "alma"],
+    "fedora": {
+        "git":            "git",
+        "libusb":         "libusb-compat-0.1",
+        "squashfs_tools": "squashfs-tools",
+        "docker":         "docker",       # via moby-engine on newer Fedora
+        "docker_compose": "docker-compose-plugin",
+        "base_devel":     "gcc make",
+        "python3":        "python3",
+        "python3_venv":   "python3-venv",
     },
-    "pacman": {
-        "detect": ["/usr/bin/pacman"],
-        "install_cmd": "pacman -S --noconfirm",
-        "update_cmd": "pacman -Sy",
-        "packages": {
-            "libusb": "libusb-compat",
-            "git": "git",
-            "squashfs_tools": "squashfs-tools",
-            "docker": "docker",
-        },
-        "distros": ["arch", "manjaro", "endeavouros", "garuda"],
+    "arch": {
+        # CachyOS, Arch Linux, Manjaro, EndeavourOS all use this family.
+        "git":            "git",
+        "libusb":         "libusb-compat",  # provides libusb-0.1 ABI for update.exe
+        "squashfs_tools": "squashfs-tools",
+        "docker":         "docker",
+        "docker_compose": "docker-compose", # or docker-buildx for newer setups
+        "base_devel":     "base-devel",     # group: gcc, make, pkg-config, …
+        "python3":        "python",         # Arch uses 'python', not 'python3'
+        "python3_venv":   None,             # venv is built into python on Arch
     },
 }
 
-# ── Docker Build ────────────────────────────────────────────────────────────
+# AUR packages — only needed on Arch family if official repos don't have them
+# Install via: paru -S <pkg> or yay -S <pkg>
+AUR_PACKAGES_ARCH: Final[dict[str, str]] = {
+    # Currently no hard AUR requirements; listed for future reference.
+    # "librespot": "librespot",  # Example: Spotify Connect daemon
+}
 
-DOCKER_BUILD_IMAGE_NAME: Final = "lx06-firmware-builder"
-DOCKER_BUILD_IMAGE_TAG: Final = "latest"
-FIRMWARE_BUILDER_IMAGE: Final = f"{DOCKER_BUILD_IMAGE_NAME}:{DOCKER_BUILD_IMAGE_TAG}"
-DOCKERFILE_PATH: Final = str(Path(__file__).parent.parent / "resources" / "docker" / "Dockerfile.firmware-builder")
+# ─── OS Detection Markers ─────────────────────────────────────────────────────
 
-# ── SquashFS Settings ───────────────────────────────────────────────────────
-# Must match the original firmware's squashfs parameters for the LX06
+# /etc/os-release ID values for each distro family
+OS_FAMILY_MAP: Final[dict[str, str]] = {
+    # Exact ID match → family
+    "ubuntu":      "debian",
+    "debian":      "debian",
+    "raspbian":    "debian",
+    "linuxmint":   "debian",
+    "pop":         "debian",
+    "elementary":  "debian",
+    "kali":        "debian",
+    "fedora":      "fedora",
+    "rhel":        "fedora",
+    "centos":      "fedora",
+    "rocky":       "fedora",
+    "almalinux":   "fedora",
+    "arch":        "arch",
+    "cachyos":     "arch",    # CachyOS reports ID=cachyos or ID=arch
+    "manjaro":     "arch",
+    "endeavouros": "arch",
+    "garuda":      "arch",
+    "artix":       "arch",
+}
 
-SQUASHFS_COMPRESSION: Final = "xz"
-SQUASHFS_BLOCK_SIZE: Final = 131072  # 128KB
-SQUASHFS_XATTRS: Final = True
-SQUASHFS_EXCLUDE: Final[list[str]] = []  # No exclusions by default
+# ID_LIKE values — if ID doesn't match, check ID_LIKE
+OS_LIKE_MAP: Final[dict[str, str]] = {
+    "debian":      "debian",
+    "ubuntu":      "debian",
+    "arch":        "arch",    # CachyOS sets ID_LIKE=arch
+    "fedora":      "fedora",
+    "rhel":        "fedora",
+}
 
-# ── Bootloader ──────────────────────────────────────────────────────────────
+# ─── Download URLs ────────────────────────────────────────────────────────────
 
-BOOTLOADER_BOOTDELAY: Final = 15  # Seconds to wait in U-boot console
-BOOTLOADER_UNLOCK_COMMANDS: Final[list[str]] = [
-    "setenv bootdelay 15",
-    "saveenv",
+# xiaogpt — soft AI patch
+XIAOGPT_REPO: Final[str] = "https://github.com/yihong0618/xiaogpt.git"
+
+# open-xiaoai — hard AI patch (Rust binary)
+OPEN_XIAOAI_REPO: Final[str] = "https://github.com/idootop/open-xiaoai.git"
+
+# xiaoai-patch — reference for SquashFS patching patterns
+XIAOAI_PATCH_REPO: Final[str] = "https://github.com/duhow/xiaoai-patch.git"
+
+# ─── Bootloader ──────────────────────────────────────────────────────────────
+
+# Bootdelay value for unlocked bootloader (seconds)
+BOOTLOADER_BOOTDELAY: Final[int] = 15
+
+# ─── Minimum file size thresholds for sanity checks ───────────────────────────
+
+MIN_SQUASHFS_SIZE_BYTES: Final[int] = 1 * 1024 * 1024   #  1 MB  — probably empty if smaller
+MIN_PARTITION_DUMP_RATIO: Final[float] = 0.5              # Dump must be ≥ 50 % of expected size
+
+# ─── SquashFS Build Settings ──────────────────────────────────────────────────
+
+SQUASHFS_BLOCK_SIZE: Final[int] = 131072          # 128 KB blocks
+SQUASHFS_COMPRESSION: Final[str] = "lz4"          # Fast compression for embedded
+SQUASHFS_XATTRS: Final[bool] = True               # Preserve extended attributes
+SQUASHFS_EXCLUDE: Final[list[str]] = [             # Glob patterns to exclude from repack
+    "proc/*", "sys/*", "dev/*", "run/*", "tmp/*",
+    "var/log/*", "var/cache/*",
 ]
 
-# ── Xiaomi Debloat Patterns ─────────────────────────────────────────────────
-# Known paths and binaries that can be safely removed from the LX06 rootfs
+# ─── Docker Image / Build ─────────────────────────────────────────────────────
 
+# Legacy names used by docker_utils.py
+DOCKER_BUILD_IMAGE_NAME: Final[str] = "lx06-firmware-builder"
+DOCKER_BUILD_IMAGE_TAG: Final[str] = "latest"
+
+# Firmware builder image reference (docker_builder.py)
+FIRMWARE_BUILDER_IMAGE: Final[str] = f"{DOCKER_BUILD_IMAGE_NAME}:{DOCKER_BUILD_IMAGE_TAG}"
+
+# Path to the Dockerfile for the firmware builder image
+DOCKERFILE_PATH: Final[str] = "resources/docker/Dockerfile.firmware-builder"
+
+# ─── Debloat Targets ──────────────────────────────────────────────────────────
+
+# Xiaomi telemetry / data-collection services
 BLOAT_SERVICES: Final[list[str]] = [
-    "miio", "tcu", "ota", "upgrade", "xiaoai", "mico",
-    "stat_point", "data_collect", "smart_home",
+    "miio",
+    "xiaomi-data-report",
+    "xiaomi-stat-pkg",
+    "naMi",
+    "gateway-service",
 ]
 
+# Known bloat binaries to remove
 BLOAT_BINARIES: Final[list[str]] = [
-    "miio_client", "miio_report", "stat_point", "tcu_control",
-    "ota_update", "upgrade_util", "data_collect",
+    "/usr/bin/miio",
+    "/usr/bin/naMi",
+    "/usr/bin/xiaomi-data-report",
+    "/usr/bin/xiaomi-stat-pkg",
 ]
 
+# Bloat configuration files
 BLOAT_CONFIGS: Final[list[str]] = [
-    "miio.conf", "tcu.conf", "ota.conf", "xiaoai.conf",
-    "data_collect.conf", "stat_point.conf",
+    "/etc/miio/*.conf",
+    "/etc/xiaomi/*.json",
+    "/etc/init.d/*xiaomi*",
+    "/etc/init.d/*miio*",
 ]
 
+# Directories to clean out
 BLOAT_DIRECTORIES: Final[list[str]] = [
-    "var/cache/miio",
-    "var/cache/ota",
-    "var/lib/xiaomi",
+    "/data/log",
+    "/data/tmp",
+    "/data/.xiaoai",
 ]
 
+# OTA update packages / services
 OTA_PACKAGES: Final[list[str]] = [
-    "ota_update", "upgrade_util", "smart_home_updater",
+    "ota-update",
+    "xiaoai-ota",
 ]
 
-XIAOMI_BLOAT_PATTERNS: Final[dict[str, dict[str, list[str]]]] = {
-    "telemetry": {
-        "paths": [
-            "/usr/bin/miio_client",
-            "/usr/bin/miio_report",
-            "/usr/bin/stat_point",
-            "/usr/bin/tcu_control",
-            "/etc/init.d/miio",
-            "/etc/init.d/tcu",
-        ],
-        "description": "Xiaomi telemetry and reporting services",
-    },
-    "updater": {
-        "paths": [
-            "/usr/bin/ota_update",
-            "/usr/bin/upgrade_util",
-            "/etc/init.d/ota",
-            "/etc/init.d/upgrade",
-        ],
-        "description": "Over-the-air update services",
-    },
-    "voice_engine": {
-        "paths": [
-            "/usr/bin/mico_ai_proxy",
-            "/usr/bin/mico_credential",
-            "/usr/bin/mico_sound_capture",
-            "/usr/bin/xiaoai_*",
-            "/etc/init.d/mico",
-            "/etc/init.d/xiaoai",
-        ],
-        "description": "Xiaomi Xiaoai voice assistant (removing disables stock wake-word)",
-    },
-}
+# ─── Logging ──────────────────────────────────────────────────────────────────
 
-# ── Media Suite Binaries ────────────────────────────────────────────────────
-# Pre-compiled ARM64 binary names and their download sources
-
-MEDIA_BINARIES: Final[dict[str, dict[str, str]]] = {
-    "shairport-sync": {
-        "binary": "shairport-sync",
-        "config_template": "shairport-sync.conf.j2",
-        "init_script": "S90shairport-sync",
-        "description": "AirPlay audio receiver",
-    },
-    "upmpdcli": {
-        "binary": "upmpdcli",
-        "config_template": "upmpdcli.conf.j2",
-        "init_script": "S91upmpdcli",
-        "description": "UPnP/DLNA renderer",
-    },
-    "mpd": {
-        "binary": "mpd",
-        "config_template": "mpd.conf.j2",
-        "init_script": "S89mpd",
-        "description": "Music Player Daemon",
-    },
-    "snapcast-client": {
-        "binary": "snapclient",
-        "config_template": "snapcast.conf.j2",
-        "init_script": "S92snapclient",
-        "description": "Snapcast multi-room audio client",
-    },
-    "librespot": {
-        "binary": "librespot",
-        "config_template": "librespot.toml.j2",
-        "init_script": "S93librespot",
-        "description": "Spotify Connect receiver",
-    },
-}
-
-# ── AI Brain Settings ───────────────────────────────────────────────────────
-
-SUPPORTED_LLM_PROVIDERS: Final[dict[str, dict[str, str]]] = {
-    "openai": {
-        "name": "OpenAI",
-        "api_base": "https://api.openai.com/v1",
-        "default_model": "gpt-4o-mini",
-    },
-    "gemini": {
-        "name": "Google Gemini",
-        "api_base": "https://generativelanguage.googleapis.com/v1beta",
-        "default_model": "gemini-2.0-flash",
-    },
-    "kimi": {
-        "name": "Moonshot Kimi",
-        "api_base": "https://api.moonshot.cn/v1",
-        "default_model": "moonshot-v1-8k",
-    },
-}
-
-# ── AI Integration Paths (on-device) ───────────────────────────────────────
-
-XIAOGPT_INSTALL_PATH: Final = "/opt/xiaogpt"
-XIAOGPT_CONFIG_PATH: Final = "/opt/xiaogpt/xiao_config.yaml"
-XIAOGPT_INIT_SCRIPT: Final = "S80xiaogpt"
-
-OPEN_XIAOAI_BINARY_NAME: Final = "open-xiaoai"
-OPEN_XIAOAI_INSTALL_PATH: Final = "/usr/bin/open-xiaoai"
-OPEN_XIAOAI_CONFIG_PATH: Final = "/etc/open-xiaoai/config.toml"
-OPEN_XIAOAI_INIT_SCRIPT: Final = "S80open-xiaoai"
-
-# ── Checksum ────────────────────────────────────────────────────────────────
-
-CHECKSUM_BUFFER_SIZE: Final = 65536  # 64KB read buffer for hashing
-
-# ── Logging ─────────────────────────────────────────────────────────────────
-
-LOG_FORMAT: Final = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-LOG_DATE_FORMAT: Final = "%Y-%m-%d %H:%M:%S"
-LOG_MAX_FILES: Final = 5
-LOG_MAX_SIZE_MB: Final = 10
+DEFAULT_LOG_DIR: Final[str] = "logs"
+LOG_FORMAT: Final[str] = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
+LOG_DATE_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
+LOG_MAX_FILES: Final[int] = 5
+LOG_MAX_SIZE_MB: Final[int] = 10

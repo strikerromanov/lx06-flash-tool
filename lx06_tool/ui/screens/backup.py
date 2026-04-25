@@ -11,6 +11,12 @@ from textual.screen import Screen
 from textual.widgets import Button, Markdown, ProgressBar, RichLog
 
 from lx06_tool.app import LX06App
+from lx06_tool.modules.backup import (
+    dump_all_partitions,
+    compute_checksums,
+    verify_backup,
+    generate_backup_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +64,7 @@ class BackupScreen(Screen):
             self.app.run_worker(self._go_next())
 
     async def _run_backup(self) -> None:
-        """Run the full backup sequence."""
+        """Run the full backup sequence using new standalone functions."""
         self.backup_started = True
         log = self.query_one(RichLog)
         progress = self.query_one("#backup-progress", ProgressBar)
@@ -68,50 +74,98 @@ class BackupScreen(Screen):
             return
 
         try:
-            # Step 1: Unlock bootloader
+            tool = app.get_aml_tool()
+            backup_dir = app.config.backup_dir
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            # Step 1: Unlock bootloader via AmlogicTool directly
             log.write("[bold blue]Step 1: Unlocking bootloader...[/]")
             progress.update(progress=5)
 
-            bl_mgr = app.get_bootloader_mgr()
-            status = await bl_mgr.unlock(on_output=lambda s, l: log.write(f"  [{s}] {l}"))
+            try:
+                # Set bootdelay for recovery access
+                await tool.setenv("bootdelay", "15")
+                await tool.saveenv()
 
-            if status.is_safe_for_flashing:
-                log.write(f"[green]Bootloader unlocked (bootdelay={status.bootdelay})[/]")
-            else:
-                log.write("[yellow]Warning: Bootdelay is low. Device may be harder to recover.[/]")
+                # Verify by reading back
+                from lx06_tool.utils.runner import run
+                result = await run(
+                    [str(tool._exe), "bulkcmd", "printenv bootdelay"],
+                    timeout=10,
+                )
+
+                bootdelay = 0
+                if result.ok:
+                    output = result.stdout + result.stderr
+                    if "bootdelay=15" in output:
+                        bootdelay = 15
+                    elif "bootdelay=" in output:
+                        try:
+                            val = output.split("bootdelay=")[1].split()[0].strip()
+                            bootdelay = int(val)
+                        except (ValueError, IndexError):
+                            pass
+
+                if bootdelay >= 5:
+                    log.write(f"[green]Bootloader unlocked (bootdelay={bootdelay})[/]")
+                else:
+                    log.write("[yellow]Warning: Bootdelay is low. Device may be harder to recover.[/]")
+
+            except Exception as exc:
+                log.write(f"[yellow]Bootloader unlock warning: {exc}[/]")
+                log.write("[dim]Continuing with backup — bootloader may already be unlocked.[/]")
 
             progress.update(progress=15)
 
-            # Step 2: Dump partitions
+            # Step 2: Dump all partitions
             log.write("\n[bold blue]Step 2: Dumping MTD partitions...[/]")
-            backup_mgr = app.get_backup_mgr()
 
-            partitions = ["mtd0", "mtd1", "mtd2", "mtd3", "mtd4", "mtd5", "mtd6"]
+            def on_partition_start(mtd_name: str, label: str) -> None:
+                log.write(f"\n  Dumping {mtd_name} ({label})...")
 
-            async def on_dump_status(mtd: str, status_msg: str) -> None:
-                log.write(f"  [{mtd}] {status_msg}")
+            def on_line(line: str) -> None:
+                pass  # Suppress noisy output
 
-            backup_set = await backup_mgr.dump_all_partitions(
-                partitions=partitions,
-                on_partition_start=lambda mtd: log.write(f"\n  Dumping {mtd}..."),
-                on_partition_done=lambda mtd: progress.update(progress=15 + int(60 * partitions.index(mtd) / len(partitions))),
-                on_output=lambda s, l: None,
+            backup_set = await dump_all_partitions(
+                tool=tool,
+                backup_dir=backup_dir,
+                on_partition_start=on_partition_start,
+                on_line=on_line,
             )
 
-            progress.update(progress=80)
+            # Update progress for each partition dumped
+            num_partitions = len(backup_set.partitions)
+            for i, (mtd_name, part) in enumerate(backup_set.partitions.items()):
+                log.write(f"  [green]\u2713[/] {mtd_name} ({part.label}): {part.size_bytes:,} bytes")
+                progress.update(progress=15 + int(50 * (i + 1) / max(num_partitions, 1)))
 
-            # Step 3: Verify backups
-            log.write("\n[bold blue]Step 3: Verifying backup integrity...[/]")
-            is_valid = await backup_mgr.verify_backup(backup_set)
+            progress.update(progress=70)
 
-            if is_valid:
+            # Step 3: Compute checksums
+            log.write("\n[bold blue]Step 3: Computing checksums...[/]")
+
+            def on_checksum(mtd_name: str, checksums: object) -> None:
+                log.write(f"  {mtd_name}: SHA256 OK")
+
+            await compute_checksums(backup_set, on_partition=on_checksum)
+
+            progress.update(progress=85)
+
+            # Step 4: Verify backups
+            log.write("\n[bold blue]Step 4: Verifying backup integrity...[/]")
+            await verify_backup(backup_set)
+
+            if backup_set.all_verified:
                 log.write("[bold green]All backups verified successfully![/]")
             else:
                 log.write("[bold yellow]Some partitions failed verification. Check details above.[/]")
 
-            # Save manifest
-            manifest_path = await backup_mgr.save_manifest(backup_set)
-            log.write(f"\nBackup manifest saved to: {manifest_path}")
+            # Store backup set in app config
+            app.config.backup = backup_set
+
+            # Generate and display report
+            report = generate_backup_report(backup_set)
+            log.write(f"\n[dim]{report}[/]")
 
             progress.update(progress=100)
             self.backup_complete = True

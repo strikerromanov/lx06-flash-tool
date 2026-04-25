@@ -161,7 +161,7 @@ class AsyncDownloader:
         """
         if dest_dir.exists() and (dest_dir / ".git").exists():
             logger.info("Git repo already exists at %s, pulling latest", dest_dir)
-            from lx06_tool.utils.runner import AsyncRunner
+            from lx06_tool.utils.compat import AsyncRunner
             runner = AsyncRunner()
             await runner.run(["git", "-C", str(dest_dir), "pull"], check=True)
             return dest_dir
@@ -169,7 +169,7 @@ class AsyncDownloader:
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Cloning %s (branch=%s, depth=%d) → %s", repo_url, branch, depth, dest_dir)
 
-        from lx06_tool.utils.runner import AsyncRunner
+        from lx06_tool.utils.compat import AsyncRunner
         runner = AsyncRunner()
         await runner.run(
             ["git", "clone", "--depth", str(depth), "--branch", branch, repo_url, str(dest_dir)],

@@ -23,7 +23,7 @@ from typing import Callable
 from lx06_tool.constants import FIRMWARE_BUILDER_IMAGE, DOCKERFILE_PATH
 from lx06_tool.exceptions import DockerBuildError, DockerNotAvailableError
 from lx06_tool.utils.docker_utils import DockerUtils
-from lx06_tool.utils.runner import AsyncRunner, CommandResult
+from lx06_tool.utils.compat import AsyncRunner, CommandResult
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +111,8 @@ class DockerBuilder:
 
         build_context = dockerfile.parent
         await self._docker.build_image(
-            tag=FIRMWARE_BUILDER_IMAGE,
-            dockerfile_path=str(dockerfile),
-            build_context=str(build_context),
+            dockerfile_path=dockerfile,
+            context_dir=build_context,
             on_output=on_output,
         )
 

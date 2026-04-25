@@ -47,7 +47,6 @@ class CustomizeScreen(Screen):
             # ── Debloat Section ──
             with Collapsible(title="Debloat", collapsed=False):
                 with Vertical(classes="section"):
-                    yield Checkbox("Enable Debloat", id="debloat-enabled", value=True)
                     yield Checkbox("Remove Xiaomi Telemetry", id="remove-telemetry", value=True)
                     yield Checkbox("Remove OTA Updater", id="remove-ota", value=True)
                     yield Checkbox("Remove Xiaoai Voice Engine (aggressive)", id="remove-xiaoai", value=False)
@@ -55,38 +54,28 @@ class CustomizeScreen(Screen):
             # ── Media Section ──
             with Collapsible(title="Media Player Suite", collapsed=False):
                 with Vertical(classes="section"):
-                    yield Checkbox("Enable Media Suite", id="media-enabled", value=True)
-                    yield Checkbox("AirPlay (Shairport-Sync)", id="install-airplay", value=True)
-                    yield Checkbox("DLNA/UPnP (Upmpdcli/MPD)", id="install-dlna", value=True)
-                    yield Checkbox("Spotify Connect (librespot)", id="install-spotify", value=True)
+                    yield Checkbox("AirPlay (Shairport-Sync)", id="install-airplay", value=False)
+                    yield Checkbox("DLNA/UPnP (Upmpdcli/MPD)", id="install-dlna", value=False)
+                    yield Checkbox("Spotify Connect (librespot)", id="install-spotify", value=False)
                     yield Checkbox("Multi-room Audio (Snapcast)", id="install-snapcast", value=False)
-                    yield Checkbox("Squeezelite (Logitech Squeezebox)", id="install-squeezelite", value=False)
-
-            # ── Spotify Config ──
-            with Collapsible(title="Spotify Configuration", collapsed=True):
-                with Vertical(classes="section"):
-                    yield Static("Leave blank for anonymous mode (no account needed with librespot).")
-                    yield Input(placeholder="Spotify Username", id="spotify-user")
-                    yield Input(placeholder="Spotify Password", id="spotify-pass", password=True)
 
             # ── AI Brain Section ──
             with Collapsible(title="AI Brain / Voice Intelligence", collapsed=False):
                 with Vertical(classes="section"):
-                    yield Checkbox("Enable AI Integration", id="ai-enabled", value=True)
                     yield Checkbox(
                         "Soft Patch (xiaogpt — keeps Xiaomi wake word, routes to LLM)",
-                        id="ai-soft", value=True,
+                        id="ai-soft", value=False,
                     )
                     yield Checkbox(
                         "Hard Patch (open-xiaoai — custom wake word, fully local)",
                         id="ai-hard", value=False,
                     )
                     yield Static("\nLLM Configuration:", classes="section-title")
-                    yield Input(placeholder="LLM Provider (openai/google/kimi)", id="llm-provider", value="openai")
+                    yield Input(placeholder="LLM Provider (openai/gemini/kimi)", id="llm-provider", value="openai")
                     yield Input(placeholder="API Key", id="llm-api-key", password=True)
-                    yield Input(placeholder="API Base URL (optional)", id="llm-api-base")
                     yield Input(placeholder="Model name (optional)", id="llm-model")
                     yield Input(placeholder="Custom Wake Word (hard patch only)", id="wake-word", value="hey_assistant")
+                    yield Input(placeholder="AI Server URL (hard patch only)", id="ai-server-url")
 
         with Horizontal(id="customize-actions"):
             yield Button("Confirm Selections", variant="success", id="confirm-btn")
@@ -114,31 +103,49 @@ class CustomizeScreen(Screen):
 
     async def _confirm(self) -> None:
         """Collect all selections and pass to the app."""
+
+        # Determine AI mode from checkboxes
+        ai_soft = self._get_checkbox("ai-soft")
+        ai_hard = self._get_checkbox("ai-hard")
+
+        if ai_hard:
+            ai_mode = "hard"
+        elif ai_soft:
+            ai_mode = "soft"
+        else:
+            ai_mode = "none"
+
+        # If soft AI mode is selected, keep xiaoai voice
+        remove_xiaoai = self._get_checkbox("remove-xiaoai")
+        if ai_mode == "soft" and remove_xiaoai:
+            # Soft AI requires xiaoai voice — force it off
+            remove_xiaoai = False
+
         choices = CustomizationChoices(
             # Debloat
-            debloat_enabled=self._get_checkbox("debloat-enabled"),
             remove_telemetry=self._get_checkbox("remove-telemetry"),
-            remove_ota=self._get_checkbox("remove-ota"),
-            remove_xiaoai=self._get_checkbox("remove-xiaoai"),
+            remove_auto_updater=self._get_checkbox("remove-ota"),
+            remove_xiaoai_voice=remove_xiaoai,
             # Media
-            media_enabled=self._get_checkbox("media-enabled"),
             install_airplay=self._get_checkbox("install-airplay"),
             install_dlna=self._get_checkbox("install-dlna"),
             install_spotify=self._get_checkbox("install-spotify"),
             install_snapcast=self._get_checkbox("install-snapcast"),
-            install_squeezelite=self._get_checkbox("install-squeezelite"),
-            spotify_username=self._get_input("spotify-user"),
-            spotify_password=self._get_input("spotify-pass"),
             # AI
-            ai_enabled=self._get_checkbox("ai-enabled"),
-            ai_soft_patch=self._get_checkbox("ai-soft"),
-            ai_hard_patch=self._get_checkbox("ai-hard"),
+            ai_mode=ai_mode,
             llm_provider=self._get_input("llm-provider") or "openai",
             llm_api_key=self._get_input("llm-api-key"),
-            llm_api_base=self._get_input("llm-api-base") or None,
-            llm_model=self._get_input("llm-model") or None,
-            wake_word=self._get_input("wake-word") or None,
+            llm_model=self._get_input("llm-model"),
+            custom_wake_word=self._get_input("wake-word"),
+            ai_server_url=self._get_input("ai-server-url"),
         )
+
+        # Validate
+        errors = choices.validate()
+        if errors:
+            # Show validation errors — don't proceed
+            # For now just log; could add a modal later
+            logger.warning("Customization validation errors: %s", errors)
 
         app = self.app
         if isinstance(app, LX06App):

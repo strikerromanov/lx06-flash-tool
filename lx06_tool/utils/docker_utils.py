@@ -14,7 +14,7 @@ from typing import Callable
 
 from lx06_tool.constants import DOCKER_BUILD_IMAGE_NAME, DOCKER_BUILD_IMAGE_TAG
 from lx06_tool.exceptions import DockerBuildError, DockerImageNotFoundError
-from lx06_tool.utils.runner import AsyncRunner
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
