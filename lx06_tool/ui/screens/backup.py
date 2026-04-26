@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -78,6 +80,7 @@ class BackupScreen(Screen):
         with Vertical(id="backup-actions"):
             yield Button("Start Backup", variant="primary", id="start-btn")
             yield Button("Skip Backup", variant="warning", id="skip-btn")
+            yield Button("Download Log", variant="default", id="download-log-btn")
             yield Button("Continue", variant="success", id="continue-btn", disabled=True)
 
     def on_mount(self) -> None:
@@ -107,6 +110,8 @@ class BackupScreen(Screen):
             self.app.run_worker(self._run_backup())
         elif event.button.id == "skip-btn":
             self._handle_skip()
+        elif event.button.id == "download-log-btn":
+            self._download_log()
         elif event.button.id == "continue-btn":
             self.app.run_worker(self._go_next())
 
@@ -151,6 +156,44 @@ class BackupScreen(Screen):
         self.query_one("#continue-btn", Button).disabled = False
 
         self.app.update_status("Backup SKIPPED — no recovery if flash fails!")
+
+    def _download_log(self) -> None:
+        """Download the current log content to a file."""
+        try:
+            log = self.query_one(RichLog)
+
+            # Extract plain text from RichLog lines
+            lines = []
+            for child in log._lines:  # RichLog stores rendered lines
+                try:
+                    lines.append(child.plain if hasattr(child, 'plain') else str(child))
+                except Exception:
+                    lines.append(str(child))
+
+            text = "\n".join(lines) if lines else "(empty log)"
+
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"lx06_backup_log_{timestamp}.txt"
+
+            # Save to backup directory if available, otherwise to home
+            try:
+                app = self.app
+                if isinstance(app, LX06App) and app.config.backup_dir:
+                    output_path = app.config.backup_dir / filename
+                else:
+                    output_path = Path.home() / filename
+            except Exception:
+                output_path = Path.home() / filename
+
+            output_path.write_text(text, encoding="utf-8")
+
+            log.write(f"\n[green]✓[/] Log saved to: {output_path}")
+            self.app.notify(f"Log saved to: {output_path}", severity="information")
+
+        except Exception as exc:
+            log.write(f"\n[red]✗[/] Failed to save log: {exc}")
+            self.app.notify(f"Failed to save log: {exc}", severity="error")
 
     async def _run_backup(self) -> None:
         """Run the full backup sequence using new standalone functions."""
