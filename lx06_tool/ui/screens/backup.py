@@ -232,7 +232,31 @@ class BackupScreen(Screen):
                 await tool.setenv("bootdelay", "15", sudo_password=pw)
                 log.write("[green]✓ bootdelay set to 15[/]")
                 await tool.saveenv(sudo_password=pw)
-                log.write("[green]✓ Environment saved[/]")
+
+                # Immediately verify to keep device busy and prevent restart
+                from lx06_tool.utils.runner import run
+                result = await run(
+                    [str(tool._exe), "bulkcmd", "printenv bootdelay"],
+                    timeout=10,
+                )
+
+                bootdelay = 0
+                if result.ok:
+                    output = result.stdout + result.stderr
+                    if "bootdelay=15" in output:
+                        bootdelay = 15
+                    elif "bootdelay=" in output:
+                        try:
+                            val = output.split("bootdelay=")[1].split()[0].strip()
+                            bootdelay = int(val)
+                        except (ValueError, IndexError):
+                            pass
+
+                if bootdelay >= 5:
+                    log.write(f"[green]✓ Environment saved and verified (bootdelay={bootdelay})[/]")
+                else:
+                    log.write("[yellow]Warning: Bootdelay is low. Device may be harder to recover.[/]")
+
             except Exception as exc:
                 log.write(f"[yellow]Bootloader unlock warning: {exc}[/]")
                 log.write("[dim]Continuing with backup — bootloader may already be unlocked.[/]")
