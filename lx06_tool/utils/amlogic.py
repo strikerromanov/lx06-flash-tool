@@ -104,7 +104,7 @@ class AmlogicTool:
 
     # ─── Identify ───────────────────────────────────────────────────────
 
-    async def identify(self, timeout: int = 10) -> IdentifyResult:
+    async def identify(self, timeout: int = 3) -> IdentifyResult:
         """Run `update identify` to detect device in USB burning mode."""
         result = await self._run_sudo([self._update, "identify"], timeout=timeout)
         return IdentifyResult(result.combined_output)
@@ -114,26 +114,62 @@ class AmlogicTool:
         timeout_seconds: int = 120,
         on_status: object = None,
     ) -> IdentifyResult:
-        """Repeatedly run identify until device is found or timeout.
+        """Two-phase device detection.
 
-        The USB burning mode window is ~2 seconds after power-on,
-        so we poll rapidly to catch it.
+        Phase 1: Fast sysfs polling (no subprocess) at 50ms intervals.
+        Phase 2: Run `update identify` to confirm once USB device appears.
+
+        The USB burning mode window is ~2 seconds after power-on.
         """
         import time
         deadline = time.monotonic() + timeout_seconds
         attempt = 0
+        phase = 1
+
+        # Phase 1: Fast sysfs polling — no subprocess overhead
+        sysfs_path = Path("/sys/bus/usb/devices")
+        aml_vids = {"1b8e"}  # Amlogic vendor ID
 
         while time.monotonic() < deadline:
             attempt += 1
-            result = await self.identify(timeout=5)
+
+            if phase == 1:
+                # Fast poll: just check if Amlogic USB device exists in sysfs
+                try:
+                    if sysfs_path.exists():
+                        for dev_dir in sysfs_path.iterdir():
+                            vid_file = dev_dir / "idVendor"
+                            if vid_file.exists():
+                                try:
+                                    vid = vid_file.read_text().strip()
+                                    if vid in aml_vids:
+                                        log_ok("sysfs", 0, f"Amlogic device detected: {dev_dir.name}")
+                                        phase = 2  # Switch to identify phase
+                                        break
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                if phase == 1:
+                    if on_status and callable(on_status):
+                        remaining = int(deadline - time.monotonic())
+                        on_status(attempt, max(0, remaining))
+                    await asyncio.sleep(0.05)  # 50ms fast poll
+                    continue
+
+            # Phase 2: Run identify to confirm and get firmware version
+            if on_status and callable(on_status):
+                remaining = int(deadline - time.monotonic())
+                on_status(attempt, max(0, remaining))
+
+            result = await self.identify(timeout=3)
             if result.success:
-                log_ok("identify", 0, f"Device found after {attempt} attempts")
+                log_ok("identify", 0, f"Device confirmed after {attempt} attempts")
                 return result
 
-            if on_status and callable(on_status):
-                on_status(attempt, timeout_seconds - int(time.monotonic() - (deadline - timeout_seconds)))
-
-            await asyncio.sleep(0.1)
+            # Device disappeared from identify but was in sysfs — keep trying
+            await asyncio.sleep(0.05)
 
         log_err("identify", -1, f"Timeout after {timeout_seconds}s ({attempt} attempts)")
         return IdentifyResult(f"Timeout after {attempt} attempts")
