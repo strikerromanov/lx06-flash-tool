@@ -77,10 +77,15 @@ class AsyncRunner:
         effective_timeout = int(timeout or self._default_timeout)
 
         # Build stdin_data when sudo -S is needed
+        # Also preserve HOME environment to avoid .cache permission issues
         stdin_data: str | None = None
         if use_sudo and pw:
-            actual_cmd = ["sudo", "-S"] + str_cmd
+            # Use -S to read password from stdin, -H to preserve HOME environment
+            actual_cmd = ["sudo", "-S", "-H"] + str_cmd
             stdin_data = pw + "\n"
+        elif use_sudo:
+            # Preserve HOME even without password (for passwordless sudo)
+            actual_cmd = ["sudo", "-H"] + str_cmd
 
         if on_output is not None:
             def _on_stdout(line: str) -> None:
