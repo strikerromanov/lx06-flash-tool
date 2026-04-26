@@ -142,8 +142,19 @@ class USBConnectScreen(Screen):
 
     async def _detect_device(self) -> None:
         """Run the identify loop to detect the Amlogic device in USB burning mode."""
-        # Ensure password is stored
+        # Ensure password is stored — try reading from input first
         sudo_ctx = self.app.sudo_ctx  # type: ignore[attr-defined]
+        if not sudo_ctx.has_password:
+            try:
+                from textual.widgets import Input
+                pw_input = self.query_one("#sudo_password PasswordInput Input", Input)
+                pw = pw_input.value.strip()
+                if pw:
+                    sudo_ctx.password = pw
+                    self._log.write("[green]Password captured from input field.[/green]")
+            except Exception:
+                pass
+
         if not sudo_ctx.has_password:
             # Try to validate without password (root / NOPASSWD)
             valid = await sudo_ctx.validate()
