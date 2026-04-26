@@ -392,7 +392,7 @@ class LX06App(App):
             system_dump=system_dump,
             boot_dump=boot_dump if boot_dump.exists() else None,
             extract_dir=build_dir / "extracted",
-            rootfs_dir=build_dir / "extracted" / "squashfs-root",
+            rootfs_dir=build_dir / "extracted",  # unsquashfs extracts directly to this dir
             output_dir=build_dir / "output",
             output_system=build_dir / "output" / "root.squashfs",
             output_boot=build_dir / "output" / "boot.img",
