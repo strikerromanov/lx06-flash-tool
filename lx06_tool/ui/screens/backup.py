@@ -16,7 +16,6 @@ from lx06_tool.app import LX06App
 from lx06_tool.modules.backup import (
     compute_checksums,
     dump_all_partitions,
-    generate_backup_report,
     verify_backup,
 )
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
@@ -317,7 +316,11 @@ class BackupScreen(Screen):
             app.config.backup = backup_set
 
             # Generate and display report
-            report = generate_backup_report(backup_set)
+            report_lines = ["Backup Report:"]
+            for mtd, pb in sorted(backup_set.partitions.items()):
+                status = f"{pb.size_bytes:,} bytes" if pb.size_bytes else "skipped"
+                report_lines.append(f"  {mtd} ({pb.label}): {status}")
+            report = "\n".join(report_lines)
             log.write(f"\n[dim]{report}[/]")
 
             progress.update(progress=100)
