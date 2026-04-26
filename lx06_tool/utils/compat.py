@@ -70,7 +70,7 @@ class AsyncRunner:
     ) -> CommandResult:
         """Execute *cmd* and return a CommandResult."""
         use_sudo = sudo if sudo is not None else self._sudo
-        pw = sudo_password if sudo_password is not None else self._sudo_password
+        pw = sudo_password if sudo_password else self._sudo_password
         str_cmd = [str(c) for c in cmd]
         actual_cmd = ["sudo"] + str_cmd if use_sudo else str_cmd
 
