@@ -126,6 +126,8 @@ async def dump_all_partitions(
     on_line            : Called with each output line from the tool.
     on_partition_skip  : Called with (mtd_name, reason) when a partition is skipped.
     """
+    import asyncio
+
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -150,6 +152,11 @@ async def dump_all_partitions(
 
             if on_partition_done:
                 on_partition_done(part)
+
+            # Add delay between partitions to let device stabilize
+            # This prevents I/O errors on larger partitions (boot0/boot1/system0/system1)
+            if idx < len(PARTITION_MAP) - 1:
+                await asyncio.sleep(2)  # 2 second delay between partitions
 
             # Check device connection after each partition (except last)
             if idx < len(PARTITION_MAP) - 1:
