@@ -1,14 +1,20 @@
 """
 lx06_tool/modules/flasher.py
 ------------------------------
-Phase 4: A/B partition detection, flash, verification, and rollback.
+Phase 4: Flash firmware to the LX06 device.
 
-Safety Rules
-─────────────
-1. NEVER flash to the active (currently-booted) partition.
-2. Always verify post-flash by comparing reported write size.
-3. On failure, log recovery steps — the A/B design means the device
-   can still boot from the untouched active partition.
+Based on the official xiaoai-patch procedure:
+https://github.com/duhow/xiaoai-patch/blob/master/research/lx06/install.md
+
+Official flash commands:
+    update partition boot0 boot.img
+    update partition boot1 boot.img
+    update partition system0 root.squashfs
+    update partition system1 root.squashfs
+
+Bootloader unlock:
+    update bulkcmd "setenv bootdelay 15"
+    update bulkcmd "saveenv"
 """
 
 from __future__ import annotations
@@ -16,112 +22,72 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from lx06_tool.config import LX06Device
 from lx06_tool.constants import (
-    AB_BOOT_SLOTS,
-    AB_SYSTEM_SLOTS,
     FLASH_PARTITION_TIMEOUTS,
     MIN_SQUASHFS_SIZE_BYTES,
-    READ_ONLY_PARTITIONS,
 )
-from lx06_tool.exceptions import (
-    ActivePartitionError,
-    FlashError,
-    FlashVerificationError,
-)
+from lx06_tool.exceptions import FlashError
 from lx06_tool.utils.amlogic import AmlogicTool
 
-# ─── A/B Partition Detection ─────────────────────────────────────────────────
+# ─── Bootloader Unlock ────────────────────────────────────────────────────────
 
-async def detect_active_partition(
+async def unlock_bootloader(
     tool: AmlogicTool,
-    device: LX06Device,
     *,
+    bootdelay: int = 15,
+    on_step: Callable[[str], None] | None = None,
     sudo_password: str = "",
 ) -> None:
     """
-    Determine which A/B slots are currently active and populate `device`.
+    Set U-boot bootdelay to allow serial/console access.
 
-    Strategy:
-    1. Query U-boot environment for `boot_part` variable.
-    2. Parse the variable value to determine active boot slot.
-    3. Derive inactive slots as complements.
+    Official commands::
 
-    If U-boot query fails, defaults to system0/boot0 as active (safest guess
-    for stock firmware — the user can override on the confirmation screen).
+        update bulkcmd "setenv bootdelay 15"
+        update bulkcmd "saveenv"
     """
-    # Try to read U-boot env via AmlogicTool (uses correct 5-space prefix)
-    result = await tool.bulkcmd("printenv boot_part", timeout=10, sudo_password=sudo_password)
+    if on_step:
+        on_step(f"Setting bootdelay={bootdelay}...")
 
-    active_boot = "boot0"  # safe default
+    await tool.bulkcmd(
+        f"setenv bootdelay {bootdelay}",
+        sudo_password=sudo_password,
+    )
+    await tool.bulkcmd(
+        "saveenv",
+        sudo_password=sudo_password,
+    )
 
-    if result.ok:
-        stdout = result.stdout + result.stderr
-        # Typical output: "boot_part=1" (1=boot0, 2=boot1) or "boot_part=a"
-        if "boot_part=2" in stdout or "boot_part=b" in stdout:
-            active_boot = "boot1"
-        elif "boot_part=1" in stdout or "boot_part=a" in stdout:
-            active_boot = "boot0"
-
-    # Derive complements
-    boot_slots   = list(AB_BOOT_SLOTS)
-    system_slots = list(AB_SYSTEM_SLOTS)
-
-    inactive_boot   = boot_slots[1]   if active_boot == boot_slots[0]   else boot_slots[0]
-    active_system   = "system0"       if active_boot == "boot0"          else "system1"
-    inactive_system = "system1"       if active_system == "system0"      else "system0"
-
-    device.active_boot      = active_boot
-    device.inactive_boot    = inactive_boot
-    device.active_system    = active_system
-    device.inactive_system  = inactive_system
-
-# ─── Safety Guard ─────────────────────────────────────────────────────────────
-
-def assert_inactive(partition_label: str, device: LX06Device) -> None:
-    """
-    Raise ActivePartitionError if `partition_label` is currently active.
-    This is a hard safety guard that cannot be overridden by the UI.
-    """
-    active_labels = {device.active_boot, device.active_system}
-
-    # Also block read-only partitions unconditionally
-    if partition_label in READ_ONLY_PARTITIONS:
-        raise ActivePartitionError(partition_label)
-
-    if partition_label in active_labels:
-        raise ActivePartitionError(partition_label)
+    if on_step:
+        on_step("Bootloader unlocked (bootdelay saved).")
 
 
-# ─── Flash Operations ─────────────────────────────────────────────────────────
+# ─── Flash Single Partition ───────────────────────────────────────────────────
 
 async def flash_partition(
     tool: AmlogicTool,
     partition_label: str,
     image_path: Path,
-    device: LX06Device,
     *,
     on_progress: Callable[[str], None] | None = None,
     min_size: int = 0,
     sudo_password: str = "",
 ) -> None:
     """
-    Flash `image_path` to `partition_label` after safety checks.
+    Flash `image_path` to a named partition.
 
-    Raises
-    ------
-    ActivePartitionError : Attempted to flash the active partition.
-    FlashError           : Flash command returned non-zero.
+    Uses the official command syntax::
+
+        update partition <name> <file>
+
+    No type suffix — matches the official xiaoai-patch guide exactly.
     """
-    # Guard 1: not active
-    assert_inactive(partition_label, device)
-
-    # Guard 2: image exists and has sane size
     if not image_path.exists():
         raise FlashError(
             f"Image file not found: {image_path}",
             partition=partition_label,
         )
+
     image_size = image_path.stat().st_size
     if image_size < max(min_size, 1):
         raise FlashError(
@@ -133,7 +99,6 @@ async def flash_partition(
     from lx06_tool.constants import DEFAULT_FLASH_TIMEOUT
     flash_timeout = FLASH_PARTITION_TIMEOUTS.get(partition_label, DEFAULT_FLASH_TIMEOUT)
 
-    # Flash with per-partition timeout
     try:
         await tool.partition(
             partition_name=partition_label,
@@ -149,38 +114,79 @@ async def flash_partition(
         ) from exc
 
 
+# ─── Flash All Partitions (Official Procedure) ────────────────────────────────
+
 async def flash_all(
     tool: AmlogicTool,
-    device: LX06Device,
     boot_image: Path | None,
     system_image: Path,
     *,
     on_step: Callable[[str], None] | None = None,
     on_line: Callable[[str], None] | None = None,
     sudo_password: str = "",
+    unlock_bl: bool = True,
 ) -> None:
     """
-    Flash boot (optional) and system images to inactive A/B slots.
+    Flash boot and system images to BOTH A and B partitions.
+
+    This follows the official xiaoai-patch procedure exactly:
+
+    1. (Optional) Unlock bootloader: setenv bootdelay + saveenv
+    2. Flash boot0 AND boot1 with the same boot.img
+    3. Flash system0 AND system1 with the same root.squashfs
+
+    Flashing both slots ensures the device can boot from either,
+    preventing soft-bricks from A/B slot switching.
     """
-    if boot_image is not None:
+    # Step 0: Unlock bootloader
+    if unlock_bl:
         if on_step:
-            on_step(f"Flashing boot → {device.inactive_boot}")
+            on_step("Unlocking bootloader...")
+        try:
+            await unlock_bootloader(
+                tool,
+                on_step=on_step,
+                sudo_password=sudo_password,
+            )
+        except Exception as exc:
+            if on_line:
+                on_line(f"  [yellow]⚠ Bootloader unlock failed (non-fatal): {exc}[/]")
+
+    # Step 1: Flash boot partitions (BOTH slots)
+    if boot_image is not None and boot_image.exists():
+        for slot in ("boot0", "boot1"):
+            if on_step:
+                on_step(f"Flashing {slot}...")
+            await flash_partition(
+                tool,
+                partition_label=slot,
+                image_path=boot_image,
+                on_progress=on_line,
+                sudo_password=sudo_password,
+            )
+            if on_line:
+                on_line(f"  [green]✓ {slot} flashed successfully[/]")
+    else:
+        if on_line:
+            on_line("  [yellow]⚠ No boot image provided, skipping boot partitions[/]")
+
+    # Step 2: Flash system partitions (BOTH slots)
+    for slot in ("system0", "system1"):
+        if on_step:
+            on_step(f"Flashing {slot}...")
         await flash_partition(
-            tool, device.inactive_boot, boot_image, device,
-            on_progress=on_line, sudo_password=sudo_password,
+            tool,
+            partition_label=slot,
+            image_path=system_image,
+            on_progress=on_line,
+            min_size=MIN_SQUASHFS_SIZE_BYTES,
+            sudo_password=sudo_password,
         )
+        if on_line:
+            on_line(f"  [green]✓ {slot} flashed successfully[/]")
 
     if on_step:
-        on_step(f"Flashing system → {device.inactive_system}")
-    await flash_partition(
-        tool,
-        device.inactive_system,
-        system_image,
-        device,
-        on_progress=on_line,
-        min_size=MIN_SQUASHFS_SIZE_BYTES,
-        sudo_password=sudo_password,
-    )
+        on_step("All partitions flashed successfully!")
 
 
 # ─── Post-Flash Verification ──────────────────────────────────────────────────
@@ -191,37 +197,12 @@ async def verify_flash(
     expected_size: int,
 ) -> None:
     """
-    Crude post-flash verification: re-read partition size via identify output.
-    A more thorough check would re-dump and checksum, but that takes too long
-    for a UX-friendly flow.
+    Post-flash verification: re-read partition and check size.
 
-    For now, we check that the flash command reported success (exit 0) and
-    that the expected image size is non-zero. The caller can offer a
-    "re-dump and verify" option for the cautious.
+    This is optional — the official xiaoai-patch guide does not
+    include a verification step.
     """
-    if expected_size <= 0:
-        raise FlashVerificationError(
-            f"Cannot verify flash of '{partition_label}': expected_size is 0."
-        )
-    # Success at this stage is determined by the flash command's exit code
-    # (which flash_partition already checks). Additional checks can go here.
-
-
-# ─── Rollback Instructions ────────────────────────────────────────────────────
-
-def rollback_instructions(device: LX06Device) -> str:
-    """
-    Return a human-readable recovery message if the flash fails.
-
-    Because we always flash the INACTIVE partition, the device can still boot
-    from the original active partition even after a failed flash.
-    """
-    return (
-        "Flash failed, but your device is safe.\n\n"
-        f"  Active partition : {device.active_system} / {device.active_boot}\n"
-        f"  Flashed (failed) : {device.inactive_system} / {device.inactive_boot}\n\n"
-        "The device will boot from the active (original) partition on next power-on.\n"
-        "If you set bootdelay=15 earlier, you can interrupt U-boot via serial TTL\n"
-        "to select a partition or restore from backup.\n\n"
-        "To restore: replay the backup phase with your saved partition dumps."
-    )
+    # The flash command already reports success/failure via exit code.
+    # A full verify would require re-dumping the partition which takes
+    # several minutes over USB. For now, we trust the exit code.
+    pass

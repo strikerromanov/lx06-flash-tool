@@ -11,10 +11,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import FlashResult, LX06App
-from lx06_tool.modules.flasher import (
-    detect_active_partition,
-    flash_all,
-)
+from lx06_tool.modules.flasher import flash_all
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 
 logger = logging.getLogger(__name__)
@@ -23,14 +20,12 @@ FLASH_INFO = """## Phase 4: Flash Firmware
 
 This is the final step — writing the custom firmware to your device.
 
-**How it works:**
-1. Detect which A/B partition is currently **inactive**
-2. Flash boot image to the inactive boot partition
-3. Flash system image to the inactive system partition
-4. Verify the flash
+**Official procedure (from xiaoai-patch):**
+1. Unlock bootloader: `setenv bootdelay 15` + `saveenv`
+2. Flash boot0 AND boot1 with the same boot.img
+3. Flash system0 AND system1 with the same root.squashfs
 
-The active partition remains untouched, so if anything goes wrong,
-your device will still boot from the original partition.
+Both A/B slots are flashed to prevent soft-bricks.
 
 \u26a0\ufe0f **Do NOT disconnect USB or power during flashing!**
 """
@@ -109,7 +104,7 @@ class FlashScreen(Screen):
             self.query_one(RichLog).write("[yellow]Cancel requested (current operation will complete)[/]")
 
     async def _run_flash(self) -> None:
-        """Run the flashing process using new standalone functions."""
+        """Run the flashing process using official xiaoai-patch procedure."""
         log = self.query_one(RichLog)
         progress = self.query_one("#flash-progress", ProgressBar)
         status = self.query_one("#flash-status", Static)
@@ -127,33 +122,16 @@ class FlashScreen(Screen):
         result = FlashResult()
 
         try:
-            device = app.device
-            if not device:
-                log.write("[red]No device connected. Go back to USB Connection.[/]")
-                self.query_one("#start-btn", Button).disabled = False
-                return
-
             tool = app.get_aml_tool()
 
-            # Step 1: Detect A/B partitions
-            log.write("[bold blue]Step 1: Detecting A/B partitions...[/]")
-            await detect_active_partition(tool, device, sudo_password=pw)
+            # Step 1: Find images
+            log.write("[bold blue]Step 1: Locating firmware images...[/]")
 
-            log.write(f"  Active boot:    {device.active_boot}")
-            log.write(f"  Inactive boot:  {device.inactive_boot}")
-            log.write(f"  Active system:  {device.active_system}")
-            log.write(f"  Inactive system: {device.inactive_system}")
-            status.update(f"Target: {device.inactive_system}")
-
-            progress.update(progress=10)
-
-            # Step 2: Find images
             build_dir = app.config.build_dir / "output"
             system_image = build_dir / "root.squashfs"
             boot_image = build_dir / "boot.img"
 
             if not system_image.exists():
-                # Try alternative paths
                 system_image = app.config.build_dir / "root.squashfs"
             if not boot_image.exists():
                 boot_image = app.config.build_dir / "boot.img"
@@ -170,12 +148,16 @@ class FlashScreen(Screen):
                 log.write("  [yellow]No boot image found — skipping boot partition[/]")
                 boot_image = None
 
-            progress.update(progress=20)
+            progress.update(progress=10)
 
-            # Step 3: Flash with progress tracking
-            log.write("\n[bold blue]Step 2: Flashing firmware...[/]")
+            # Step 2: Flash using official procedure
+            # This flashes BOTH A/B partitions (boot0+boot1, system0+system1)
+            # and unlocks bootloader (setenv bootdelay + saveenv)
+            log.write("\n[bold blue]Step 2: Flashing firmware (official procedure)...[/]")
+            log.write("  Bootloader will be unlocked (bootdelay=15)")
+            log.write("  Both A/B slots will be flashed for safety")
 
-            flash_progress = 20
+            flash_progress = 10
 
             def on_step(step_msg: str) -> None:
                 nonlocal flash_progress
@@ -184,14 +166,12 @@ class FlashScreen(Screen):
 
             def on_progress(line: str) -> None:
                 nonlocal flash_progress
-                # Estimate progress from output
                 flash_progress = min(flash_progress + 1, 95)
                 progress.update(progress=flash_progress)
                 app.update_progress(flash_progress)
 
             await flash_all(
                 tool=tool,
-                device=device,
                 boot_image=boot_image,
                 system_image=system_image,
                 on_step=on_step,
@@ -199,34 +179,26 @@ class FlashScreen(Screen):
                 sudo_password=pw,
             )
 
-            # Flash succeeded
-            result.success = True
-            result.boot_flashed = boot_image is not None
-            result.system_flashed = True
-            result.verified = True
-
             progress.update(progress=100)
-            log.write("\n[bold green]Flash completed successfully![/]")
-            status.update("Flash complete! Unplug USB and power cycle the device.")
+            app.update_progress(100)
 
-            duration = time.monotonic() - start_time
-            result.duration_sec = duration
+            elapsed = time.monotonic() - start_time
+            log.write(f"\n[bold green]Flash completed in {elapsed:.1f}s![/]")
+            status.update("Flash complete! You can safely disconnect the device.")
 
-            await app.on_flash_done(result)
+            result.success = True
+            result.elapsed_seconds = elapsed
+            app.flash_result = result
 
         except Exception as exc:
-            duration = time.monotonic() - start_time
-            result.duration_sec = duration
-            result.errors.append(str(exc))
+            elapsed = time.monotonic() - start_time
+            log.write(f"\n[bold red]Flash failed after {elapsed:.1f}s: {exc}[/]")
+            status.update(f"Flash failed: {exc}")
+            result.success = False
+            result.error_message = str(exc)
+            result.elapsed_seconds = elapsed
+            app.flash_result = result
 
-            log.write(f"\n[bold red]Flash error:[/] {exc}")
-            logger.error("Flash failed: %s", exc, exc_info=True)
-            status.update(f"Flash error: {exc}")
-
-            # Still report result to complete screen
-            try:
-                await app.on_flash_done(result)
-            except Exception:
-                self.query_one("#start-btn", Button).disabled = False
-
-        self.query_one("#cancel-btn", Button).disabled = True
+        finally:
+            self.query_one("#start-btn", Button).disabled = False
+            self.query_one("#cancel-btn", Button).disabled = True
