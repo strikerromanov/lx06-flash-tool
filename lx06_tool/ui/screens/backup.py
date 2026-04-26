@@ -223,52 +223,60 @@ class BackupScreen(Screen):
             # Step 2: Dump all partitions
             log.write("\n[bold blue]Step 2: Dumping MTD partitions...[/]")
 
-            skipped: list[str] = []
-            def on_partition_start(mtd_name: str, label: str) -> None:
-                log.write(f"\n  Dumping {mtd_name} ({label})...")
+            # Start USB monitoring for the entire dump sequence
+            from lx06_tool.utils.usb_monitor import USBSafetyGuard
 
-            def on_line(line: str) -> None:
-                pass  # Suppress noisy output
+            async with USBSafetyGuard(
+                tool,
+                keep_alive_interval=30.0,  # Send keep-alive every 30 seconds
+                on_disconnect=lambda: log.write("[bold red]Device disconnected during backup![/]"),
+            ):
+                skipped: list[str] = []
+                def on_partition_start(mtd_name: str, label: str) -> None:
+                    log.write(f"\n  Dumping {mtd_name} ({label})...")
 
-            def on_partition_skip(mtd_name: str, reason: str) -> None:
-                skipped.append(mtd_name)
-                log.write(f"  [yellow]\u26a0 Skipped {mtd_name}: {reason}[/]")
+                def on_line(line: str) -> None:
+                    pass  # Suppress noisy output
 
-            # Pass sudo_password for partition dump operations
-            backup_set = await dump_all_partitions(
-                tool=tool,
-                backup_dir=backup_dir,
-                on_partition_start=on_partition_start,
-                on_line=on_line,
-                on_partition_skip=on_partition_skip,
-                sudo_password=pw,
-            )
+                def on_partition_skip(mtd_name: str, reason: str) -> None:
+                    skipped.append(mtd_name)
+                    log.write(f"  [yellow]\u26a0 Skipped {mtd_name}: {reason}[/]")
 
-            # Update progress for each partition dumped
-            num_partitions = len(backup_set.partitions)
-            for i, (mtd_name, part) in enumerate(backup_set.partitions.items()):
-                log.write(f"  [green]\u2713[/] {mtd_name} ({part.label}): {part.size_bytes:,} bytes")
-                progress.update(progress=15 + int(50 * (i + 1) / max(num_partitions, 1)))
+                # Pass sudo_password for partition dump operations
+                backup_set = await dump_all_partitions(
+                    tool=tool,
+                    backup_dir=backup_dir,
+                    on_partition_start=on_partition_start,
+                    on_line=on_line,
+                    on_partition_skip=on_partition_skip,
+                    sudo_password=pw,
+                )
 
-            if skipped:
-                log.write(f"\n[yellow]⚠ {len(skipped)} partition(s) could not be dumped: {', '.join(skipped)}[/]")
-                log.write("[yellow]You may still proceed, but recovery options are limited for those partitions.[/]")
+                    # Update progress for each partition dumped
+                num_partitions = len(backup_set.partitions)
+                for i, (mtd_name, part) in enumerate(backup_set.partitions.items()):
+                    log.write(f"  [green]\u2713[/] {mtd_name} ({part.label}): {part.size_bytes:,} bytes")
+                    progress.update(progress=15 + int(50 * (i + 1) / max(num_partitions, 1)))
 
-            progress.update(progress=70)
+                if skipped:
+                    log.write(f"\n[yellow]⚠ {len(skipped)} partition(s) could not be dumped: {', '.join(skipped)}[/]")
+                    log.write("[yellow]You may still proceed, but recovery options are limited for those partitions.[/]")
 
-            # Step 3: Compute checksums
-            log.write("\n[bold blue]Step 3: Computing checksums...[/]")
+                progress.update(progress=70)
 
-            def on_checksum(mtd_name: str, checksums: object) -> None:
-                log.write(f"  {mtd_name}: SHA256 OK")
+                # Step 3: Compute checksums
+                log.write("\n[bold blue]Step 3: Computing checksums...[/]")
 
-            await compute_checksums(backup_set, on_partition=on_checksum)
+                def on_checksum(mtd_name: str, checksums: object) -> None:
+                    log.write(f"  {mtd_name}: SHA256 OK")
 
-            progress.update(progress=85)
+                await compute_checksums(backup_set, on_partition=on_checksum)
 
-            # Step 4: Verify backups
-            log.write("\n[bold blue]Step 4: Verifying backup integrity...[/]")
-            await verify_backup(backup_set)
+                progress.update(progress=85)
+
+                # Step 4: Verify backups
+                log.write("\n[bold blue]Step 4: Verifying backup integrity...[/]")
+                await verify_backup(backup_set)
 
             if backup_set.all_verified:
                 log.write("[bold green]All backups verified successfully![/]")
