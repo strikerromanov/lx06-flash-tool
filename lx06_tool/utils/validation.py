@@ -131,7 +131,7 @@ def validate_filename(filename: str) -> str:
         filename: Raw filename from user
 
     Returns:
-        Sanitized filename
+        Validated filename
 
     Raises:
         ValueError: If filename is invalid
@@ -139,8 +139,15 @@ def validate_filename(filename: str) -> str:
     if not isinstance(filename, str):
         raise ValueError(f"Filename must be string, got {type(filename)}")
 
-    # Remove null bytes and path separators
-    filename = filename.replace('\x00', '').replace('/', '').replace('\\', '')
+    # Remove null bytes but check for path separators first
+    filename = filename.replace('\x00', '')
+
+    # Check for path separators before stripping
+    if '/' in filename or '\\' in filename:
+        raise ValueError(
+            f"Filename contains path separator. "
+            f"Filenames must not contain '/' or '\\': {filename[:100]}"
+        )
 
     # Check for dangerous patterns
     if '..' in filename:
