@@ -40,16 +40,18 @@ HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120    # 2 minutes
 
 # LX06 NAND partition layout (Amlogic AXG platform).
 # mtd device → label, expected size in bytes.
-# Sizes verified against official xiaoai-patch guide:
-# https://github.com/duhow/xiaoai-patch/blob/master/research/lx06/info.md
+#
+# NOTE: Official xiaoai-patch guide shows smaller system partitions (26.5 MB),
+# but actual LX06 devices have 40 MB system partitions. Using actual device sizes.
+# Verified from successful backups.
 PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
     "mtd0": {"label": "bootloader", "size": 0x200000},   #  2 MB
     "mtd1": {"label": "tpl",        "size": 0x800000},   #  8 MB
     "mtd2": {"label": "boot0",      "size": 0x600000},   #  6 MB
     "mtd3": {"label": "boot1",      "size": 0x600000},   #  6 MB
-    "mtd4": {"label": "system0",    "size": 0x2820000},  # 26.5 MB — SquashFS rootfs A
-    "mtd5": {"label": "system1",    "size": 0x2800000},  # 26.5 MB — SquashFS rootfs B
-    "mtd6": {"label": "data",       "size": 0x13e0000},  # 20 MB
+    "mtd4": {"label": "system0",    "size": 0x2800000},  # 40 MB — SquashFS rootfs A
+    "mtd5": {"label": "system1",    "size": 0x2800000},  # 40 MB — SquashFS rootfs B
+    "mtd6": {"label": "data",       "size": 0x1400000},  # 20 MB
 }
 
 # Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.

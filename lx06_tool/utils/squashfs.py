@@ -77,9 +77,15 @@ class SquashFSTool:
             raise InvalidFirmwareError(f"Firmware image not found: {image_path}")
 
         # Remove existing extraction to avoid conflicts
+        import shutil
         if output_dir.exists():
-            import shutil
+            logger.debug("Removing existing extraction directory: %s", output_dir)
             shutil.rmtree(output_dir, ignore_errors=True)
+
+        # Also check if there's a file at the output path (from failed extraction)
+        if output_dir.is_file():
+            logger.warning("Removing file at extraction directory path: %s", output_dir)
+            output_dir.unlink()
 
         output_dir.parent.mkdir(parents=True, exist_ok=True)
 

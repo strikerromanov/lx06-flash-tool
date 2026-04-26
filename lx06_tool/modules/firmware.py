@@ -164,6 +164,19 @@ class FirmwareOrchestrator:
             on_output("stdout", f"Extracting {self._paths.system_dump.name}...")
 
         try:
+            # Clean up any leftover state from previous failed extractions
+            # This handles cases where unsquashfs left partial directories
+            if self._paths.extract_dir.exists():
+                logger.info("Cleaning up leftover extraction directory: %s", self._paths.extract_dir)
+                shutil.rmtree(self._paths.extract_dir, ignore_errors=True)
+
+            # Also check if parent directory has a file where extract_dir should be
+            if self._paths.extract_dir.parent.exists():
+                for item in self._paths.extract_dir.parent.iterdir():
+                    if item.name == self._paths.extract_dir.name and item.is_file():
+                        logger.warning("Removing file at extraction path: %s", item)
+                        item.unlink()
+
             self._paths.extract_dir.mkdir(parents=True, exist_ok=True)
             await self._squashfs.extract(
                 self._paths.system_dump,
