@@ -1,4 +1,0 @@
-# Amlogic USB Burning Mode - LX06 Flash Tool
-# Compatible with systemd-udevd (Arch/CachyOS) and eudev
-# MODE=0666 gives universal read/write, uaccess tag for console user ACLs
-SUBSYSTEM=="usb", ATTR{idVendor}=="1b8e", ATTR{idProduct}=="c003", MODE="0666", TAG+="uaccess"

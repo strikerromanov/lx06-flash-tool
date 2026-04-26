@@ -1,29 +1,39 @@
 """
 lx06_tool/constants.py
 ----------------------
-Hardware constants, partition maps, USB identifiers, download URLs,
-and per-distro package name tables.
+Hardware constants, partition maps, download URLs, and per-distro package tables.
 
-CachyOS is Arch-based: uses pacman, optionally paru/yay for AUR.
+Based on the official xiaoai-patch guide and LX06 hardware reference.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
+# ─── Application ───────────────────────────────────────────────────────────────
+
+APP_NAME: Final[str] = "lx06-tool"
+
+BACKUP_SUBDIR:  Final[str] = "backups"
+BUILD_SUBDIR:   Final[str] = "build"
+TOOLS_SUBDIR:   Final[str] = "tools"
+
+# Docker image used for isolated squashfs builds (legacy, kept for config compat)
+DOCKER_BUILD_IMAGE: Final[str] = "lx06-firmware-builder:latest"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+DEFAULT_LOG_DIR: Final[str] = "logs"
+LOG_FORMAT: Final[str] = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
+LOG_DATE_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
+LOG_MAX_FILES: Final[int] = 5
+LOG_MAX_SIZE_MB: Final[int] = 10
+
 # ─── USB / Amlogic ────────────────────────────────────────────────────────────
 
-# Amlogic SoC USB burning mode identifiers
 AMLOGIC_USB_VENDOR_ID:  Final[str] = "1b8e"
 AMLOGIC_USB_PRODUCT_ID: Final[str] = "c003"
 
-# The LX06 uses the Amlogic AXG (A113X) SoC
-LX06_CHIP: Final[str] = "AXG"
-
-# udev rule line — identifies the Amlogic bootloader USB mode.
-# Uses MODE="0666" for universal access + TAG+="uaccess" for systemd-udevd
-# (Arch/CachyOS use systemd-udevd which honours uaccess tags).
-# No GROUP="plugdev" — that group only exists on Debian/Ubuntu.
 UDEV_RULE_LINE: Final[str] = (
     'SUBSYSTEM=="usb", '
     f'ATTR{{idVendor}}=="{AMLOGIC_USB_VENDOR_ID}", '
@@ -31,100 +41,8 @@ UDEV_RULE_LINE: Final[str] = (
     'MODE="0666", TAG+="uaccess"'
 )
 
-# Handshake polling parameters
-FAST_POLL_INTERVAL_S: Final[float] = 0.05    # 50 ms — sysfs/lsusb fast poll
-HANDSHAKE_POLL_INTERVAL_S: Final[float] = 0.1   # 100 ms — identify poll
-HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120    # 2 minutes
-
-# ─── Partition Map ────────────────────────────────────────────────────────────
-
-# LX06 NAND partition layout (Amlogic AXG platform).
-# mtd device → label, expected size in bytes.
-#
-# NOTE: Official xiaoai-patch guide shows smaller system partitions (26.5 MB),
-# but actual LX06 devices have 40 MB system partitions. Using actual device sizes.
-# Verified from successful backups.
-PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
-    "mtd0": {"label": "bootloader", "size": 0x200000},   #  2 MB
-    "mtd1": {"label": "tpl",        "size": 0x800000},   #  8 MB
-    "mtd2": {"label": "boot0",      "size": 0x600000},   #  6 MB
-    "mtd3": {"label": "boot1",      "size": 0x600000},   #  6 MB
-    "mtd4": {"label": "system0",    "size": 0x2820000},  # 40.2 MB — SquashFS rootfs A
-    "mtd5": {"label": "system1",    "size": 0x2800000},  # 40 MB — SquashFS rootfs B
-    "mtd6": {"label": "data",       "size": 0x13e0000},  # 20 MB
-}
-
-# Flashable partition size limits (for pre-flash validation)
-# Use the SMALLER of system0/system1 as the universal limit.
-LX06_PARTITION_SIZES: Final[dict[str, int]] = {
-    "boot0":      0x600000,     # 6,291,456 bytes
-    "boot1":      0x600000,     # 6,291,456 bytes
-    "system0":    0x2820000,    # 42,188,800 bytes (~40 MB)
-    "system1":    0x2800000,    # 41,943,040 bytes (~40 MB)
-    "data":       0x13e0000,    # 20,805,632 bytes
-}
-LX06_MAX_SYSTEM_SIZE: Final[int] = 0x2800000  # 41,943,040 bytes (~40 MB)
-
-# Size fallback list for system partitions — some devices have bad blocks
-# or different NAND layouts that cause the official size (0x2820000) to fail.
-# Try the official size first, then fall back to smaller sizes.
-LX06_SYSTEM_SIZES_TO_TRY: Final[list[int]] = [0x2820000, 0x2800000]
-
-# Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
-# Large squashfs partitions (~26.5 MB) and data partition (20 MB) can take
-# 10-15 minutes each over USB bulk due to protocol overhead.
-PARTITION_TIMEOUTS: Final[dict[str, int]] = {
-    "bootloader": 180,   # 3 min — small (2 MB)
-    "tpl":        240,   # 4 min — medium (8 MB)
-    "boot0":      180,   # 3 min — medium (6 MB)
-    "boot1":      180,   # 3 min — medium (6 MB)
-    "system0":    900,   # 15 min — large squashfs (26.5 MB)
-    "system1":    900,   # 15 min — large squashfs (26.5 MB)
-    "data":       900,   # 15 min — data partition (20 MB, may be slow)
-}
-DEFAULT_PARTITION_TIMEOUT: Final[int] = 300  # 5 min fallback
-
-# Per-partition flash timeouts (seconds) — writes are slower than reads.
-FLASH_PARTITION_TIMEOUTS: Final[dict[str, int]] = {
-    "bootloader": 180,   # 3 min
-    "tpl":        240,   # 4 min
-    "boot0":      180,   # 3 min
-    "boot1":      180,   # 3 min
-    "system0":    600,   # 10 min — large squashfs writes are slow
-    "system1":    600,   # 10 min — large squashfs writes are slow
-    "data":       600,   # 10 min
-}
-DEFAULT_FLASH_TIMEOUT: Final[int] = 300  # 5 min fallback for flash
-
-# Which partitions form the A/B slot pairs
-AB_BOOT_SLOTS:   Final[tuple[str, str]] = ("boot0",   "boot1")
-AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
-
-# Partitions that are read-only references (bootloader / tpl) — never flash these
-READ_ONLY_PARTITIONS: Final[frozenset[str]] = frozenset({"bootloader", "tpl"})
-
-# Partitions to skip during backup — inactive A/B slot or not needed.
-# NOTE: The active system partition varies by device (system0 OR system1).
-# The build phase now detects the active partition by checking squashfs magic bytes.
-# This set is unused (backup dumps all partitions) but kept for reference.
-SKIP_BACKUP_PARTITIONS: Final[frozenset[str]] = frozenset({"boot1", "data"})
-
-# ─── aml-flash-tool / update.exe ─────────────────────────────────────────────
-
-AML_FLASH_TOOL_REPO: Final[str] = "https://github.com/radxa/aml-flash-tool.git"
-AML_FLASH_TOOL_DIR:  Final[str] = "aml-flash-tool"
-
-# Relative path inside the cloned repo to the Linux x86-64 binary
-UPDATE_EXE_RELPATH: Final[str] = "tools/linux-x86/update"
-
-# udev rules file from the Radxa repo (Ubuntu 14 era, but the rule content is fine)
-AML_UDEV_RULES_RELPATH: Final[str] = "tools/_install_/70-persistent-usb-ubuntu14.rules"
-# Where we install our own udev rule
 UDEV_RULES_DEST: Final[str] = "/etc/udev/rules.d/70-lx06-amlogic.rules"
 
-# Old/conflicting udev rules that should be removed before installing ours.
-# These come from older versions of aml-flash-tool, Radxa scripts,
-# or Ubuntu-specific packages that use GROUP="plugdev" (doesn't exist on Arch).
 OLD_UDEV_RULES: Final[list[str]] = [
     "/etc/udev/rules.d/70-persistent-usb-ubuntu14.rules",
     "/etc/udev/rules.d/99-amlogic.rules",
@@ -134,7 +52,6 @@ OLD_UDEV_RULES: Final[list[str]] = [
     "/lib/udev/rules.d/99-amlogic-usb.rules",
 ]
 
-# Directories to search for old Amlogic udev rules via glob
 UDEV_GLOB_DIRS: Final[list[str]] = [
     "/etc/udev/rules.d",
     "/lib/udev/rules.d",
@@ -142,7 +59,6 @@ UDEV_GLOB_DIRS: Final[list[str]] = [
     "/run/udev/rules.d",
 ]
 
-# Filename patterns that indicate old/conflicting Amlogic udev rules
 UDEV_GLOB_PATTERNS: Final[list[str]] = [
     "*amlogic*",
     "*1b8e*",
@@ -150,82 +66,110 @@ UDEV_GLOB_PATTERNS: Final[list[str]] = [
     "*persistent-usb*",
 ]
 
-# ─── Paths & Directories ─────────────────────────────────────────────────────
+# Handshake polling
+HANDSHAKE_POLL_INTERVAL_S: Final[float] = 0.1
+HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120
 
-# Application identifier used for config/data/cache dirs (XDG)
-APP_NAME: Final[str] = "lx06-tool"
+# ─── Partition Map (from /proc/mtd on LX06) ────────────────────────────────────
+#
+# mtd0: bootloader  0x200000  (2 MB)
+# mtd1: tpl         0x800000  (8 MB)
+# mtd2: boot0       0x600000  (6 MB)    — Kernel A
+# mtd3: boot1       0x600000  (6 MB)    — Kernel B
+# mtd4: system0     0x2820000 (40.2 MB) — Rootfs A (squashfs, xz, 128KB blocks)
+# mtd5: system1     0x2800000 (40 MB)   — Rootfs B (squashfs, xz, 128KB blocks)
+# mtd6: data        0x13e0000 (20.8 MB) — Persistent data (UBIFS)
 
-# Default subdirectory names (resolved at runtime relative to XDG dirs)
-BACKUP_SUBDIR:  Final[str] = "backups"
-BUILD_SUBDIR:   Final[str] = "build"
-TOOLS_SUBDIR:   Final[str] = "tools"
+PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
+    "mtd0": {"label": "bootloader", "size": 0x200000},
+    "mtd1": {"label": "tpl",        "size": 0x800000},
+    "mtd2": {"label": "boot0",      "size": 0x600000},
+    "mtd3": {"label": "boot1",      "size": 0x600000},
+    "mtd4": {"label": "system0",    "size": 0x2820000},
+    "mtd5": {"label": "system1",    "size": 0x2800000},
+    "mtd6": {"label": "data",       "size": 0x13e0000},
+}
 
-# Docker image used for isolated squashfs builds
-DOCKER_BUILD_IMAGE: Final[str] = "lx06-firmware-builder:latest"
+# Ordered list of partitions for backup (MTD order)
+BACKUP_ORDER: Final[list[str]] = [
+    "mtd0", "mtd1", "mtd2", "mtd3", "mtd4", "mtd5", "mtd6",
+]
+
+# A/B slot pairs
+AB_BOOT_SLOTS:   Final[tuple[str, str]] = ("boot0", "boot1")
+AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
+
+# Max squashfs image size for LX06 (system1 size — the smaller system partition)
+LX06_MAX_SYSTEM_SIZE: Final[int] = 0x2800000  # 41,943,040 bytes (40 MB)
+
+# Per-partition dump timeouts (seconds) — USB 2.0 is slow
+PARTITION_TIMEOUTS: Final[dict[str, int]] = {
+    "bootloader": 180,
+    "tpl":        240,
+    "boot0":      180,
+    "boot1":      180,
+    "system0":    900,   # 15 min — large squashfs
+    "system1":    900,
+    "data":       900,
+}
+DEFAULT_PARTITION_TIMEOUT: Final[int] = 300
+
+# Per-partition flash timeouts (seconds)
+FLASH_TIMEOUTS: Final[dict[str, int]] = {
+    "boot0":      180,
+    "boot1":      180,
+    "system0":    600,   # 10 min
+    "system1":    600,
+}
+DEFAULT_FLASH_TIMEOUT: Final[int] = 300
+
+# SquashFS magic bytes
+SQUASHFS_MAGIC_LE: Final[bytes] = b'hsqs'
+
+# ─── aml-flash-tool ────────────────────────────────────────────────────────────
+
+AML_FLASH_TOOL_REPO: Final[str] = "https://github.com/radxa/aml-flash-tool.git"
+AML_FLASH_TOOL_DIR:  Final[str] = "aml-flash-tool"
+UPDATE_EXE_RELPATH:  Final[str] = "tools/linux-x86/update"
+
+# ─── Firmware Download ────────────────────────────────────────────────────────
+
+FIRMWARE_RELEASES_URL: Final[str] = "https://api.github.com/repos/duhow/xiaoai-patch/releases/latest"
+FIRMWARE_REPO_URL: Final[str] = "https://github.com/duhow/xiaoai-patch"
+FIRMWARE_FILE_PATTERN: Final[str] = "mico_firmware_*_lx06.tar"
+
+# Files expected in firmware tarball
+FIRMWARE_BOOT_FILE: Final[str] = "boot.img"
+FIRMWARE_SYSTEM_FILE: Final[str] = "root.squashfs"
 
 # ─── Per-Distro Package Tables ────────────────────────────────────────────────
-#
-# Structure:
-#   DISTRO_PACKAGES[family][logical_name] = "exact-package-name"
-#
-# Families:
-#   "debian"  → apt  (Debian, Ubuntu, Raspberry Pi OS, …)
-#   "fedora"  → dnf  (Fedora, RHEL, CentOS Stream, …)
-#   "arch"    → pacman (Arch Linux, CachyOS, Manjaro, EndeavourOS, …)
-#
-# Notes for Arch/CachyOS:
-#   - squashfs-tools      → pacman (core)
-#   - libusb-compat       → pacman (extra) — provides libusb-0.1 ABI
-#   - docker              → pacman (extra) — requires manual daemon start
-#   - docker-buildx       → pacman (extra) — needed for multi-arch builds
-#   - base-devel          → needed to build AUR packages / compile tools
-#
+
 DISTRO_PACKAGES: Final[dict[str, dict[str, str | None]]] = {
     "debian": {
         "git":            "git",
         "libusb":         "libusb-0.1-4",
         "squashfs_tools": "squashfs-tools",
-        "docker":         "docker.io",
-        "docker_compose": "docker-compose-plugin",
         "base_devel":     "build-essential",
-        "python3":        "python3",
-        "python3_venv":   "python3-venv",
     },
     "fedora": {
         "git":            "git",
         "libusb":         "libusb-compat-0.1",
         "squashfs_tools": "squashfs-tools",
-        "docker":         "docker",       # via moby-engine on newer Fedora
-        "docker_compose": "docker-compose-plugin",
         "base_devel":     "gcc make",
-        "python3":        "python3",
-        "python3_venv":   "python3-venv",
     },
     "arch": {
-        # CachyOS, Arch Linux, Manjaro, EndeavourOS all use this family.
         "git":            "git",
-        "libusb":         "libusb-compat",  # provides libusb-0.1 ABI for update.exe
+        "libusb":         "libusb-compat",
         "squashfs_tools": "squashfs-tools",
-        "docker":         "docker",
-        "docker_compose": "docker-compose", # or docker-buildx for newer setups
-        "base_devel":     "base-devel",     # group: gcc, make, pkg-config, …
-        "python3":        "python",         # Arch uses 'python', not 'python3'
-        "python3_venv":   None,             # venv is built into python on Arch
+        "base_devel":     "base-devel",
+        "python3":        "python",
+        "python3_venv":   None,  # venv built into python on Arch
     },
 }
 
-# AUR packages — only needed on Arch family if official repos don't have them
-# Install via: paru -S <pkg> or yay -S <pkg>
-AUR_PACKAGES_ARCH: Final[dict[str, str]] = {
-    # Currently no hard AUR requirements; listed for future reference.
-    # "librespot": "librespot",  # Example: Spotify Connect daemon
-}
+# ─── OS Detection ─────────────────────────────────────────────────────────────
 
-# ─── OS Detection Markers ─────────────────────────────────────────────────────
-
-# /etc/os-release ID values for each distro family
 OS_FAMILY_MAP: Final[dict[str, str]] = {
-    # Exact ID match → family
     "ubuntu":      "debian",
     "debian":      "debian",
     "raspbian":    "debian",
@@ -235,138 +179,30 @@ OS_FAMILY_MAP: Final[dict[str, str]] = {
     "kali":        "debian",
     "fedora":      "fedora",
     "rhel":        "fedora",
-    "centos":      "fedora",
+    "centos":       "fedora",
     "rocky":       "fedora",
     "almalinux":   "fedora",
     "arch":        "arch",
-    "cachyos":     "arch",    # CachyOS reports ID=cachyos or ID=arch
+    "cachyos":     "arch",
     "manjaro":     "arch",
     "endeavouros": "arch",
     "garuda":      "arch",
     "artix":       "arch",
 }
 
-# ID_LIKE values — if ID doesn't match, check ID_LIKE
 OS_LIKE_MAP: Final[dict[str, str]] = {
-    "debian":      "debian",
-    "ubuntu":      "debian",
-    "arch":        "arch",    # CachyOS sets ID_LIKE=arch
-    "fedora":      "fedora",
-    "rhel":        "fedora",
+    "debian": "debian",
+    "ubuntu": "debian",
+    "arch":   "arch",
+    "fedora": "fedora",
+    "rhel":   "fedora",
 }
 
-# ─── Download URLs ────────────────────────────────────────────────────────────
+# ─── Bootloader ───────────────────────────────────────────────────────────────
 
-# xiaogpt — soft AI patch
-XIAOGPT_REPO: Final[str] = "https://github.com/yihong0618/xiaogpt.git"
-
-# open-xiaoai — hard AI patch (Rust binary)
-OPEN_XIAOAI_REPO: Final[str] = "https://github.com/idootop/open-xiaoai.git"
-
-# xiaoai-patch — reference for SquashFS patching patterns
-XIAOAI_PATCH_REPO: Final[str] = "https://github.com/duhow/xiaoai-patch.git"
-
-# ─── Bootloader ──────────────────────────────────────────────────────────────
-
-# Bootdelay value for unlocked bootloader (seconds)
 BOOTLOADER_BOOTDELAY: Final[int] = 15
 
-# ─── Minimum file size thresholds for sanity checks ───────────────────────────
+# ─── Validation ───────────────────────────────────────────────────────────────
 
-MIN_SQUASHFS_SIZE_BYTES: Final[int] = 1 * 1024 * 1024   #  1 MB  — probably empty if smaller
-MIN_PARTITION_DUMP_RATIO: Final[float] = 0.5              # Dump must be ≥ 50 % of expected size
-
-# SquashFS magic bytes for format validation
-SQUASHFS_MAGIC_LE: Final[bytes] = b'hsqs'   # Little-endian squashfs
-SQUASHFS_MAGIC_BE: Final[bytes] = b'sqsh'   # Big-endian squashfs
-
-# ─── SquashFS Build Settings ──────────────────────────────────────────────────
-
-# Use xz compression with 256K blocks for maximum size reduction.
-# The LX06 system partition is only ~40 MB; lz4 produces images too large to fit.
-SQUASHFS_BLOCK_SIZE: Final[int] = 262144          # 256 KB blocks (better compression)
-SQUASHFS_COMPRESSION: Final[str] = "xz"            # Best compression ratio for embedded
-SQUASHFS_XATTRS: Final[bool] = False              # Skip xattrs to save space
-SQUASHFS_EXCLUDE: Final[list[str]] = [             # Glob patterns to exclude from repack
-    "proc/*", "sys/*", "dev/*", "run/*", "tmp/*",
-    "var/log/*", "var/cache/*",
-]
-
-# Patterns for stripping unnecessary files from rootfs before repacking
-SQUASHFS_STRIP_PATTERNS: Final[list[str]] = [
-    "usr/share/doc/**/*",
-    "usr/share/man/**/*",
-    "usr/share/locale/**/*",
-    "usr/share/info/**/*",
-    "usr/share/examples/**/*",
-    "var/cache/**/*",
-    "var/log/**/*",
-    "usr/include/**/*",
-]
-
-# Extra mksquashfs flags when using xz compression
-SQUASHFS_XZ_EXTRA: Final[list[str]] = [
-    "-Xbcj", "x86",     # Branch-call-jump filter for x86 binaries
-    "-no-exports",        # Don't export NFS exports table
-    "-no-sparse",         # Don't detect sparse files
-]
-
-# ─── Docker Image / Build ─────────────────────────────────────────────────────
-
-# Legacy names used by docker_utils.py
-DOCKER_BUILD_IMAGE_NAME: Final[str] = "lx06-firmware-builder"
-DOCKER_BUILD_IMAGE_TAG: Final[str] = "latest"
-
-# Firmware builder image reference (docker_builder.py)
-FIRMWARE_BUILDER_IMAGE: Final[str] = f"{DOCKER_BUILD_IMAGE_NAME}:{DOCKER_BUILD_IMAGE_TAG}"
-
-# Path to the Dockerfile for the firmware builder image
-DOCKERFILE_PATH: Final[str] = "resources/docker/Dockerfile.firmware-builder"
-
-# ─── Debloat Targets ──────────────────────────────────────────────────────────
-
-# Xiaomi telemetry / data-collection services
-BLOAT_SERVICES: Final[list[str]] = [
-    "miio",
-    "xiaomi-data-report",
-    "xiaomi-stat-pkg",
-    "naMi",
-    "gateway-service",
-]
-
-# Known bloat binaries to remove
-BLOAT_BINARIES: Final[list[str]] = [
-    "/usr/bin/miio",
-    "/usr/bin/naMi",
-    "/usr/bin/xiaomi-data-report",
-    "/usr/bin/xiaomi-stat-pkg",
-]
-
-# Bloat configuration files
-BLOAT_CONFIGS: Final[list[str]] = [
-    "/etc/miio/*.conf",
-    "/etc/xiaomi/*.json",
-    "/etc/init.d/*xiaomi*",
-    "/etc/init.d/*miio*",
-]
-
-# Directories to clean out
-BLOAT_DIRECTORIES: Final[list[str]] = [
-    "/data/log",
-    "/data/tmp",
-    "/data/.xiaoai",
-]
-
-# OTA update packages / services
-OTA_PACKAGES: Final[list[str]] = [
-    "ota-update",
-    "xiaoai-ota",
-]
-
-# ─── Logging ──────────────────────────────────────────────────────────────────
-
-DEFAULT_LOG_DIR: Final[str] = "logs"
-LOG_FORMAT: Final[str] = "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
-LOG_DATE_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
-LOG_MAX_FILES: Final[int] = 5
-LOG_MAX_SIZE_MB: Final[int] = 10
+MIN_SQUASHFS_SIZE_BYTES: Final[int] = 1 * 1024 * 1024   # 1 MB
+MIN_PARTITION_DUMP_RATIO: Final[float] = 0.5

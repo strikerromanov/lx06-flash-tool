@@ -1,103 +1,35 @@
 # LX06 Flash Tool
 
-**Xiaomi Xiaoai Speaker Pro (LX06) — Custom Firmware Installer**
+All-in-one TUI tool to flash custom firmware (xiaoai-patch) onto the Xiaomi LX06 smart speaker.
 
-A complete, all-in-one Textual TUI application to transform your Xiaomi LX06 into a fully custom, bloatware-free smart speaker featuring universal cast capabilities, Spotify playback, and LLM-powered voice intelligence.
+## What It Does
 
-## Features
+1. **Environment Setup** — Detects your Linux distro, installs required packages, downloads aml-flash-tool, configures udev rules
+2. **USB Connection** — Guides you through entering USB burning mode, detects the device
+3. **Backup** — Dumps all 7 NAND partitions for safety
+4. **Download** — Fetches the latest pre-built firmware from [xiaoai-patch releases](https://github.com/duhow/xiaoai-patch/releases)
+5. **Flash** — Writes boot + system images to both A/B slots
 
-### Phase 1: Cross-Linux Environment Setup
-- Auto-detects host OS package manager (`apt`, `dnf`, `pacman`)
-- Automatically installs dependencies (libusb, git, squashfs-tools, Docker)
-- Downloads `aml-flash-tool` from Radxa
-- Injects udev rules and triggers USB scan detection (no reboot)
-- **Handshake Loop**: Catches the 2-second Amlogic USB bootloader window automatically
+## Supported Distros
 
-### Phase 2: Automated Backup & Safety
-- Unlocks U-boot bootloader (`bootdelay=15`) for brick recovery
-- Dumps all 7 MTD partitions (bootloader, tpl, boot0/1, system0/1, data)
-- Verifies backup integrity with SHA256 + MD5 checksums
+| Family | Distros | Package Manager |
+|--------|---------|---------------|
+| Debian | Ubuntu, Debian, Linux Mint, Pop!_OS, Kali | apt |
+| Fedora | Fedora, RHEL, Rocky, Alma | dnf |
+| Arch | CachyOS, Arch Linux, Manjaro, EndeavourOS | pacman |
 
-### Phase 3: A-La-Carte Firmware Customizer
-Interactive menu to select what to remove and install:
+## Prerequisites
 
-**Debloat:**
-- Remove Xiaomi telemetry, OTA auto-updater
-- Optionally remove stock Xiaoai voice engine
-
-**Media Player Suite:**
-- AirPlay (Shairport-Sync)
-- DLNA/UPnP (Upmpdcli/MPD)
-- Spotify Connect (librespot)
-- Multi-room Audio (Snapcast/Squeezelite)
-
-**AI Brain Selection:**
-- **Soft Patch** (xiaogpt): Keep Xiaomi wake word, route thinking to OpenAI/Gemini/Kimi
-- **Hard Patch** (open-xiaoai): Custom local wake word, fully bypass Xiaomi servers
-
-### Phase 4: Flashing & Deployment
-- Automatic A/B partition detection (targets inactive partition)
-- Real-time progress tracking during firmware upload
-- Post-flash verification
-- Rollback support on failure
-
-## Architecture
-
-```
-lx06_tool/
-├── app.py                    # Main Textual application + screen routing
-├── config.py                 # Data models (AppConfig, LX06Device, Choices)
-├── constants.py              # Partition maps, USB IDs, URLs
-├── exceptions.py             # 22-class exception hierarchy
-├── state.py                  # State machine with guards + recovery
-├── modules/
-│   ├── environment.py        # OS detection, dependency installation
-│   ├── usb_scanner.py        # udev rules, USB handshake orchestration
-│   ├── bootloader.py         # U-boot unlock + verification
-│   ├── backup.py             # MTD partition dump + checksum verification
-│   ├── firmware.py           # SquashFS extract/modify/repack pipeline
-│   ├── debloat.py            # Telemetry/OTA/Xiaoai removal engine
-│   ├── media_suite.py        # AirPlay/DLNA/Spotify/Snapcast injection
-│   ├── ai_brain.py           # Soft-patch (xiaogpt) + Hard-patch (open-xiaoai)
-│   ├── docker_builder.py     # Containerized firmware builds
-│   └── flasher.py            # A/B detection, flash, verify, rollback
-├── utils/
-│   ├── runner.py             # Async subprocess execution engine
-│   ├── logger.py             # Rich-aware structured logging
-│   ├── checksum.py           # SHA256/MD5 hashing + verification
-│   ├── downloader.py         # Async HTTP downloader with resume
-│   ├── amlogic.py            # update.exe CLI wrapper
-│   ├── squashfs.py           # unsquashfs/mksquashfs wrapper
-│   └── docker_utils.py       # Docker image build/run
-└── ui/screens/
-    ├── welcome.py            # Intro + safety warnings
-    ├── environment.py        # Dependency check + install
-    ├── usb_connect.py        # USB handshake instructions
-    ├── backup.py             # Bootloader unlock + partition dump
-    ├── customize.py          # Feature selection (debloat/media/AI)
-    ├── build.py              # Firmware build pipeline
-    ├── flash.py              # Flash with progress tracking
-    └── complete.py           # Success/failure summary
-```
+- **Linux** (amd64)
+- **Python 3.10+**
+- **USB port** + micro USB cable
+- **sudo** access
+- **git**
 
 ## Installation
 
-### Quick Install (Ubuntu/Debian/Fedora)
-
 ```bash
-git clone https://github.com/strikerromanov/lx06-flash-tool.git
-cd lx06-flash-tool
-pip install -e .
-lx06-tool
-```
-
-### Arch Linux (and other PEP 668 systems)
-
-Arch Linux uses externally-managed Python. Use a virtual environment:
-
-**Bash / Zsh:**
-```bash
-git clone https://github.com/strikerromanov/lx06-flash-tool.git
+git clone https://github.com/your-repo/lx06-flash-tool.git
 cd lx06-flash-tool
 python -m venv venv
 source venv/bin/activate
@@ -105,50 +37,102 @@ pip install -e .
 lx06-tool
 ```
 
-**Fish shell:**
-```fish
-git clone https://github.com/strikerromanov/lx06-flash-tool.git
-cd lx06-flash-tool
-python -m venv venv
-source venv/bin/activate.fish
-pip install -e .
+## Usage
+
+```bash
 lx06-tool
 ```
 
-### One-liners
+The TUI guides you through 5 screens:
 
-**Bash/Zsh:**
+1. **Welcome** — Prerequisite checks
+2. **Environment Setup** — Install packages, download tools
+3. **USB Connection** — Connect speaker, enter burning mode
+4. **Backup & Flash** — Backup partitions, download firmware, flash
+5. **Complete** — Success summary
+
+## Partition Table (LX06)
+
+| MTD | Label | Size | Description |
+|-----|-------|------|-------------|
+| mtd0 | bootloader | 2 MB | U-Boot bootloader |
+| mtd1 | tpl | 8 MB | U-Boot second stage |
+| mtd2 | boot0 | 6 MB | Kernel A |
+| mtd3 | boot1 | 6 MB | Kernel B |
+| mtd4 | system0 | 40.2 MB | Rootfs A (squashfs) |
+| mtd5 | system1 | 40 MB | Rootfs B (squashfs) |
+| mtd6 | data | 20.8 MB | Persistent data |
+
+## Flash Commands (Reference)
+
 ```bash
-git clone https://github.com/strikerromanov/lx06-flash-tool.git && cd lx06-flash-tool && python -m venv venv && source venv/bin/activate && pip install -e . && lx06-tool
+# Identify device
+update identify
+
+# Set boot delay (safety recovery)
+update bulkcmd "setenv bootdelay 15"
+update bulkcmd "saveenv"
+
+# Backup all partitions
+update mread store bootloader normal 0x200000 mtd0.img
+update mread store tpl normal 0x800000 mtd1.img
+update mread store boot0 normal 0x600000 mtd2.img
+update mread store boot1 normal 0x600000 mtd3.img
+update mread store system0 normal 0x2820000 mtd4.img
+update mread store system1 normal 0x2800000 mtd5.img
+update mread store data normal 0x13e0000 mtd6.img
+
+# Flash boot (both A/B slots)
+update partition boot0 boot.img
+update partition boot1 boot.img
+
+# Flash system (both A/B slots)
+update partition system0 root.squashfs
+update partition system1 root.squashfs
 ```
 
-**Fish:**
-```fish
-git clone https://github.com/strikerromanov/lx06-flash-tool.git; and cd lx06-flash-tool; and python -m venv venv; and source venv/bin/activate.fish; and pip install -e .; and lx06-tool
+## Project Structure
+
+```
+lx06-flash-tool/
+├── pyproject.toml
+├── README.md
+└── lx06_tool/
+    ├── app.py              # TUI app entry point
+    ├── constants.py        # Partition table, URLs, paths
+    ├── config.py           # AppConfig data model (XDG paths)
+    ├── state.py            # State machine
+    ├── exceptions.py       # Exception hierarchy
+    ├── utils/
+    │   ├── runner.py       # Async subprocess engine
+    │   ├── logger.py       # Rich logging
+    │   ├── sudo.py         # 3-tier PTY sudo
+    │   ├── checksum.py     # SHA256/MD5 verification
+    │   ├── downloader.py   # HTTP downloader
+    │   ├── amlogic.py      # Amlogic update binary wrapper
+    │   ├── debug_log.py    # Global debug log
+    │   └── compat.py       # Legacy import compat
+    └── ui/
+        ├── widgets.py      # Shared TUI widgets
+        └── screens/
+            ├── welcome.py
+            ├── environment.py
+            ├── usb_connect.py
+            ├── backup_flash.py
+            └── complete.py
 ```
 
-## Requirements
+## Recovery
 
-- Linux host (Ubuntu/Debian, Fedora, or Arch)
-- Python 3.10+
-- USB-A to USB-A cable (or USB-A to micro-USB with adapter)
-- Xiaomi LX06 (Xiaoai Speaker Pro)
-- sudo access for system-level operations
-
-## Safety Features
-
-- **A/B Partitioning**: Always flashes inactive partition; active remains intact
-- **Bootloader Unlock**: Sets `bootdelay=15` for serial recovery access
-- **Full Backup**: All 7 MTD partitions dumped with dual checksum verification
-- **Rollback**: Restore original firmware if custom build fails
-- **Active Partition Guard**: Prevents flashing to the active partition
+If flashing fails, the device can be recovered via:
+1. **Serial TTL** (115200 baud) — Interrupt U-Boot within 15 seconds (bootdelay)
+2. **Backup restore** — Flash backed-up partition images
+3. **A/B failover** — U-Boot automatically tries the other slot
 
 ## References
 
-This tool integrates logic from:
-- [duhow/xiaoai-patch](https://github.com/duhow/xiaoai-patch) — SquashFS patching, Docker-based firmware building
-- [yihong0618/xiaogpt](https://github.com/yihong0618/xiaogpt) — Xiaoai NLP interception + LLM injection
-- [idootop/open-xiaoai](https://github.com/idootop/open-xiaoai) — Rust-based microphone/speaker hijack
+- [xiaoai-patch](https://github.com/duhow/xiaoai-patch) — Custom firmware project
+- [aml-flash-tool](https://github.com/radxa/aml-flash-tool) — Amlogic flash utility
 
 ## License
 

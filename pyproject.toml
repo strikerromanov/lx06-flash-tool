@@ -28,14 +28,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "textual>=0.47.0",       # Minimum version with stable Screen.dismiss()
+    "textual>=0.47.0",
     "rich>=13.7.0",
     "pyyaml>=6.0.1",
-    "docker>=7.0.0",         # Python Docker SDK v7 removed deprecated APIs
-    "jinja2>=3.1.3",
     "httpx>=0.27.0",
-    "aiofiles>=23.2.1",
-    "platformdirs>=4.2.0",   # XDG-compliant config/data/cache paths (new dep)
+    "platformdirs>=4.2.0",
 ]
 
 [project.optional-dependencies]

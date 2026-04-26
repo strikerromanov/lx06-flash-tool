@@ -1,349 +1,360 @@
-"""Environment screen — dependency checking, installation, and tool download."""
+"""
+lx06_tool/ui/screens/environment.py
+-------------------------------------
+Environment setup screen.
+
+Detects OS, installs packages, clones aml-flash-tool, sets up udev rules,
+and creates the update.exe symlink.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import logging
+import os
+import platform
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
+from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Input, Markdown, RichLog, Static
+from textual.widgets import Label, Static
 
-from lx06_tool.app import LX06App
-from lx06_tool.modules.environment import (
-    check_dependencies,
-    detect_os,
-    install_dependencies,
-    verify_docker,
+from lx06_tool.constants import (
+    AML_FLASH_TOOL_DIR,
+    AML_FLASH_TOOL_REPO,
+    DISTRO_PACKAGES,
+    OLD_UDEV_RULES,
+    OS_FAMILY_MAP,
+    OS_LIKE_MAP,
+    UDEV_RULE_LINE,
+    UDEV_RULES_DEST,
+    UPDATE_EXE_RELPATH,
 )
-from lx06_tool.ui.widgets.copy_log import CopyLogMixin
-from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
-
-logger = logging.getLogger(__name__)
+from lx06_tool.ui.widgets import ActionButton, LogPanel, StepProgress
 
 
-class EnvironmentScreen(CopyLogMixin, Screen):
-    """Environment setup screen — checks and installs dependencies."""
+# ─── OS Detection ──────────────────────────────────────────────────────────────
+
+def _detect_os_family() -> tuple[str, str]:
+    """Detect the OS family from /etc/os-release.
+
+    Returns:
+        (family, distro_name) e.g. ("debian", "Ubuntu 24.04")
+    """
+    release_path = Path("/etc/os-release")
+    if not release_path.exists():
+        return ("unknown", f"{platform.system()} (no /etc/os-release)")
+
+    data: dict[str, str] = {}
+    with open(release_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if "=" in line:
+                key, _, value = line.partition("=")
+                data[key] = value.strip('"').strip("'")
+
+    distro_id = data.get("ID", "").lower()
+    distro_name = data.get("PRETTY_NAME", distro_id or "Unknown")
+
+    # Direct match
+    if distro_id in OS_FAMILY_MAP:
+        return (OS_FAMILY_MAP[distro_id], distro_name)
+
+    # Check ID_LIKE
+    id_like = data.get("ID_LIKE", "").lower().split()
+    for like in id_like:
+        if like in OS_LIKE_MAP:
+            return (OS_LIKE_MAP[like], distro_name)
+
+    return ("unknown", distro_name)
+
+
+# ─── Package install commands ──────────────────────────────────────────────────
+
+def _get_install_command(family: str) -> tuple[list[str], list[str]] | None:
+    """Get the package install command and package list for the given family.
+
+    Returns:
+        (command_prefix, package_names) or None if unsupported.
+    """
+    pkgs = DISTRO_PACKAGES.get(family)
+    if not pkgs:
+        return None
+
+    # Collect non-None packages
+    names: list[str] = []
+    for val in pkgs.values():
+        if val is None:
+            continue
+        names.extend(val.split())
+
+    # Remove duplicates while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
+
+    if family == "debian":
+        return (["apt-get", "install", "-y"] + unique, unique)
+    elif family == "fedora":
+        return (["dnf", "install", "-y"] + unique, unique)
+    elif family == "arch":
+        return (["pacman", "-S", "--needed", "--noconfirm"] + unique, unique)
+
+    return None
+
+
+class EnvironmentScreen(Screen):
+    """Environment setup screen — detects OS, installs deps, clones tools."""
 
     DEFAULT_CSS = """
     EnvironmentScreen {
+        align: center middle;
+    }
+    EnvironmentScreen > VerticalScroll {
+        width: 80;
+        max-width: 100%;
+        height: auto;
+        max-height: 90%;
         padding: 1 2;
     }
-    #env-log {
-        height: 1fr;
-        border: solid $primary;
-        margin: 1 0;
-    }
-    #env-actions {
-        height: auto;
-        align: center middle;
+    EnvironmentScreen .title {
+        text-align: center;
+        text-style: bold;
+        color: $primary;
         padding: 1 0;
     }
-    #sudo-row {
-        height: 3;
-        margin: 0 0 1 0;
-        align: center middle;
-    }
-    #sudo-row Static {
-        width: auto;
+    EnvironmentScreen .status {
         padding: 0 1;
-    }
-    #sudo-input {
-        width: 30;
+        color: $text-muted;
     }
     """
 
-    check_started: reactive[bool] = reactive(False)
-    check_complete: reactive[bool] = reactive(False)
-    install_complete: reactive[bool] = reactive(False)
-    tools_downloaded: reactive[bool] = reactive(False)
-
     def compose(self) -> ComposeResult:
-        yield Markdown("## Phase 1: Environment Setup\nChecking your system for required dependencies...")
-        yield RichLog(id="env-log", highlight=True, markup=True)
-        with Horizontal(id="sudo-row"):
-            yield Static("\U0001f512 Sudo Password:")
-            yield Input(
-                placeholder="Enter your sudo password...",
-                password=True,
-                id="sudo-input",
+        with VerticalScroll():
+            yield Label("⚙ Environment Setup", classes="title")
+            yield StepProgress(
+                steps=["Detect OS", "Install Packages", "Clone Tools", "Udev Rules", "Create Symlink"],
+                id="env_steps",
             )
-        with Vertical(id="env-actions"):
-            yield Button("\U0001f4cb Copy Log", variant="default", id="copy-btn")
-            yield Button("Check Environment", variant="primary", id="check-btn")
-            yield Button("Install Missing", variant="warning", id="install-btn", disabled=True)
-            yield Button("Download Tools", variant="primary", id="download-btn", disabled=True)
-            yield Button("Continue", variant="success", id="continue-btn", disabled=True)
+            yield Static("", id="env_status", classes="status")
+            yield LogPanel(title="Setup Log", id="env_log")
+            with Center():
+                yield ActionButton(
+                    label="Setup Environment",
+                    variant="primary",
+                    id="setup_btn",
+                )
+                yield ActionButton(
+                    label="Continue",
+                    variant="success",
+                    id="continue_btn",
+                    disabled=True,
+                )
 
     def on_mount(self) -> None:
-        log = self.query_one(RichLog)
-        log.write(
-            "Ready to check environment. Click 'Check Environment' to start.\n"
-            "Enter your sudo password above if packages need to be installed."
-        )
-        self._debug_sink = RichLogSink(log)
-        register_sink(self._debug_sink)
+        """Auto-run setup on mount."""
+        self._setup_done = False
+        self._log = self.query_one("#env_log", LogPanel)
+        self._status = self.query_one("#env_status", Static)
+        self._steps = self.query_one("#env_steps", StepProgress)
 
-    def on_unmount(self) -> None:
-        unregister_sink(self._debug_sink)
-
-    def _get_sudo_password(self) -> str:
-        """Get the sudo password from the input field and sync to app."""
+    def _set_status(self, text: str) -> None:
         try:
-            pw = self.query_one("#sudo-input", Input).value.strip()
+            self._status.update(text)
         except Exception:
-            pw = ""
-        # Sync to app-level SudoContext so other screens can use it
-        app = self.app
-        if isinstance(app, LX06App):
-            app.sudo_password = pw
-        return pw
+            pass
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "copy-btn":
-            try:
-                self.copy_log_to_clipboard()
-            except RuntimeError as exc:
-                self.query_one(RichLog).write(f"\n[yellow]{exc}[/]")
-            return
-        if event.button.id == "check-btn":
-            self.app.run_worker(self._run_check())
-        elif event.button.id == "install-btn":
-            self.app.run_worker(self._run_install())
-        elif event.button.id == "download-btn":
-            self.app.run_worker(self._run_download_tools())
-        elif event.button.id == "continue-btn":
-            self.app.run_worker(self._go_next())
+    # ─── Button handlers ────────────────────────────────────────────────
 
-    async def _run_check(self) -> None:
-        """Run environment dependency check using standalone functions."""
-        self.check_started = True
-        log = self.query_one(RichLog)
-        log.clear()
-        log.write("[bold blue]Checking environment...[/]")
+    def on_action_button_pressed(self, event: ActionButton.Pressed) -> None:
+        """Handle button presses."""
+        btn = event.action_button
+        if btn.id == "setup_btn":
+            btn.set_loading(True)
+            self.run_worker(self._run_setup(), exclusive=True)
+        elif btn.id == "continue_btn" and self._setup_done:
+            self.app.push_screen("usb_connect")
 
-        app = self.app
-        if not isinstance(app, LX06App):
-            log.write("[red]Error: Invalid app instance[/]")
-            return
+    # ─── Setup Pipeline ─────────────────────────────────────────────────
 
+    async def _run_setup(self) -> None:
+        """Run the full environment setup pipeline."""
         try:
-            # Step 1: Detect OS
-            os_info = detect_os()
-            app.os_info = os_info
-            log.write(f"\n[bold]OS:[/] {os_info.name} {os_info.version}")
-            log.write(f"[bold]Family:[/] {os_info.family}")
-            log.write(f"[bold]Package Manager:[/] {os_info.pkg_manager}")
-            if os_info.aur_helper:
-                log.write(f"[bold]AUR Helper:[/] {os_info.aur_helper}")
+            family, distro_name = _detect_os_family()
+            self._set_status(f"Detected: {distro_name} (family: {family})")
 
-            # Step 2: Check dependencies
-            deps = check_dependencies(os_info)
-            app.dep_statuses = deps
-            missing = [d for d in deps if not d.installed]
-            installed = [d for d in deps if d.installed]
+            if family == "unknown":
+                self._log.write(f"[red]Unsupported OS: {distro_name}[/red]")
+                self._log.write("[yellow]Supported: Debian/Ubuntu, Fedora/RHEL, Arch/Manjaro[/yellow]")
+                self._set_status("❌ Unsupported operating system")
+                self.query_one("#setup_btn", ActionButton).set_loading(False)
+                return
 
-            log.write(f"\n[bold]Dependencies:[/] {len(installed)} installed, {len(missing)} missing")
+            # Step 1: Detect OS (already done)
+            self._steps.set_current(0)
+            self._log.write(f"[green]✓ OS detected: {distro_name} ({family})[/green]")
+            await asyncio.sleep(0.3)
 
-            if missing:
-                log.write("\n[bold yellow]Missing packages:[/]")
-                for d in missing:
-                    log.write(f"  \u2717 {d.package_name} ({d.logical_name})")
-                    if d.notes:
-                        for note_line in d.notes.split("\n"):
-                            log.write(f"    [dim]{note_line}[/]")
-                self.query_one("#install-btn", Button).disabled = False
-            else:
-                log.write("\n[bold green]All dependencies satisfied![/]")
-                self.query_one("#install-btn", Button).disabled = True
+            # Step 2: Install packages
+            self._steps.set_current(1)
+            await self._install_packages(family)
 
-            if installed:
-                log.write("\n[green]Installed:[/]")
-                for d in installed:
-                    log.write(f"  \u2713 {d.package_name} ({d.logical_name})")
+            # Step 3: Clone aml-flash-tool
+            self._steps.set_current(2)
+            await self._clone_tools()
 
-            # Step 3: Check Docker
-            try:
-                await verify_docker(os_info)
-                app.docker_ok = True
-                log.write("\n[green]Docker: OK[/]")
-            except Exception as e:
-                app.docker_ok = False
-                log.write(f"\n[yellow]Docker: {e}[/]")
+            # Step 4: Udev rules
+            self._steps.set_current(3)
+            await self._setup_udev()
 
-            # Step 4: Check AML tool
-            from lx06_tool.constants import UPDATE_EXE_RELPATH
+            # Step 5: Create symlink
+            self._steps.set_current(4)
+            await self._create_symlink()
 
-            tools_dir = Path(app.config.tools_dir)
-            aml_path = tools_dir / "aml-flash-tool" / UPDATE_EXE_RELPATH
-            # Also check config-saved path
-            if not aml_path.exists() and app.config.update_exe_path:
-                aml_path = Path(app.config.update_exe_path)
-            # Also check common locations
-            if not aml_path.exists():
-                aml_path = Path("/usr/local/bin/aml-flash-tool/tools/linux-x86/update")
-            if not aml_path.exists():
-                aml_path = Path("/usr/local/bin/aml-flash-tool/update")
-
-            if aml_path and Path(aml_path).exists():
-                log.write(f"\n[green]AML Tool: OK[/] ({aml_path})")
-                app.config.update_exe_path = Path(aml_path)
-                app.config.save()
-                self.tools_downloaded = True
-            else:
-                log.write("\n[yellow]AML Tool: Not downloaded yet[/]")
-                self.query_one("#download-btn", Button).disabled = False
-
-            # Enable continue only when everything is ready
-            can_continue = (
-                len(missing) == 0
-                and self.tools_downloaded
-            )
-            self.query_one("#continue-btn", Button).disabled = not can_continue
-
-            self.check_complete = True
-            app.update_status("Environment check complete")
+            # Done
+            self._steps.set_current(5)  # past last = all done
+            self._setup_done = True
+            self._set_status("✅ Environment setup complete!")
+            self._log.write("[bold green]All setup steps completed successfully![/bold green]")
+            self.query_one("#setup_btn", ActionButton).set_loading(False)
+            self.query_one("#continue_btn", ActionButton).set_enabled(True)
 
         except Exception as exc:
-            log.write(f"\n[bold red]Error:[/] {exc}")
-            logger.error("Environment check failed: %s", exc, exc_info=True)
+            self._log.write(f"[red]Setup failed: {exc}[/red]")
+            self._set_status(f"❌ Setup failed: {exc}")
+            self.query_one("#setup_btn", ActionButton).set_loading(False)
 
-    async def _run_install(self) -> None:
-        """Install missing dependencies using the new standalone functions."""
-        log = self.query_one(RichLog)
-
-        app = self.app
-        if not isinstance(app, LX06App):
+    async def _install_packages(self, family: str) -> None:
+        """Install required packages for the detected OS family."""
+        result = _get_install_command(family)
+        if result is None:
+            self._log.write("[yellow]⚠ No packages to install for this OS family.[/yellow]")
             return
 
-        os_info = app.os_info
-        if os_info is None:
-            log.write("\n[red]Run 'Check Environment' first![/]")
-            return
+        cmd, pkg_names = result
+        self._log.write(f"Installing packages: {', '.join(pkg_names)}")
+        self._set_status(f"Installing packages: {', '.join(pkg_names)}")
 
-        # Get missing deps
-        missing = [d for d in app.dep_statuses if not d.installed]
-        if not missing:
-            log.write("\n[green]No missing packages to install.[/]")
-            return
-
-        log.write(f"\n[bold blue]Installing {len(missing)} missing packages...[/]")
-        for d in missing:
-            log.write(f"  Installing: {d.package_name}")
-
+        sudo_ctx = self.app.sudo_ctx  # type: ignore[attr-defined]
         try:
-            password = self._get_sudo_password()
-            await install_dependencies(missing, os_info, sudo_password=password)
-            log.write("\n[green]Dependencies installed successfully.[/]")
-            self.install_complete = True
-
-            # Re-check
-            deps = check_dependencies(os_info)
-            app.dep_statuses = deps
-            still_missing = [d for d in deps if not d.installed]
-
-            if not still_missing:
-                log.write("\n[bold green]All dependencies now satisfied![/]")
-                self.query_one("#install-btn", Button).disabled = True
-                if self.tools_downloaded:
-                    self.query_one("#continue-btn", Button).disabled = False
+            sr = await sudo_ctx.sudo_run(cmd, timeout=120)
+            if sr.ok:
+                self._log.write("[green]✓ Packages installed successfully.[/green]")
             else:
-                log.write(f"\n[yellow]{len(still_missing)} packages still missing:[/]")
-                for d in still_missing:
-                    log.write(f"  \u2717 {d.package_name}")
-
-            app.update_status("Installation complete")
-
+                self._log.write(f"[yellow]⚠ Package install returned exit code {sr.returncode}[/yellow]")
+                self._log.write(f"  Output: {sr.output[:500]}")
         except Exception as exc:
-            log.write(f"\n[bold red]Install error:[/] {exc}")
-            logger.error("Install failed: %s", exc, exc_info=True)
+            self._log.write(f"[red]Package install error: {exc}[/red]")
+            # Non-fatal — continue setup
+            self._log.write("[yellow]Continuing setup — packages may already be installed.[/yellow]")
 
-    async def _run_download_tools(self) -> None:
-        """Download aml-flash-tool from Radxa."""
-        log = self.query_one(RichLog)
-        app = self.app
+    async def _clone_tools(self) -> None:
+        """Clone aml-flash-tool repository."""
+        config = self.app.config  # type: ignore[attr-defined]
+        tools_dir = config.tools_dir
+        aml_dir = tools_dir / AML_FLASH_TOOL_DIR
 
-        if not isinstance(app, LX06App):
-            return
-
-        log.write("\n[bold blue]Downloading aml-flash-tool...[/]")
+        self._set_status(f"Cloning aml-flash-tool to {aml_dir}...")
+        self._log.write(f"Cloning {AML_FLASH_TOOL_REPO}...")
 
         try:
-            from lx06_tool.constants import AML_FLASH_TOOL_REPO, UPDATE_EXE_RELPATH
             from lx06_tool.utils.downloader import AsyncDownloader
-
-            tools_dir = Path(app.config.tools_dir)
-            tools_dir.mkdir(parents=True, exist_ok=True)
-            aml_dir = tools_dir / "aml-flash-tool"
-
-            if not aml_dir.exists():
-                log.write(f"  Cloning {AML_FLASH_TOOL_REPO} (branch=master)...")
-                dl = AsyncDownloader()
-                await dl.clone_git_repo(
-                    AML_FLASH_TOOL_REPO, aml_dir, branch="master"
-                )
-                log.write("  [green]Clone complete.[/]")
+            await AsyncDownloader.clone_git_repo(
+                repo_url=AML_FLASH_TOOL_REPO,
+                dest_dir=aml_dir,
+                branch="master",
+                depth=1,
+            )
+            self._log.write("[green]✓ aml-flash-tool cloned successfully.[/green]")
+        except Exception as exc:
+            # If already exists, that's fine
+            if aml_dir.exists() and (aml_dir / ".git").exists():
+                self._log.write("[green]✓ aml-flash-tool already present (pull attempted).[/green]")
             else:
-                log.write("  [dim]AML tool directory already exists, skipping clone.[/]")
+                self._log.write(f"[red]Failed to clone aml-flash-tool: {exc}[/red]")
+                raise
 
-            # Verify the binary exists
-            update_bin = aml_dir / UPDATE_EXE_RELPATH
-            if update_bin.exists():
-                update_bin.chmod(0o755)
-                app.config.update_exe_path = update_bin
-                app.config.save()
-                log.write(f"  [green]AML tool ready:[/] {update_bin}")
+    async def _setup_udev(self) -> None:
+        """Install udev rules for Amlogic USB device access."""
+        self._set_status("Setting up udev rules...")
+        self._log.write("Installing udev rules for USB device access...")
+        sudo_ctx = self.app.sudo_ctx  # type: ignore[attr-defined]
 
-                # Test the binary to verify it works on this system
-                try:
-                    from lx06_tool.utils.runner import run as async_run
-                    test_result = await async_run(
-                        [str(update_bin), "help"], timeout=5,
-                    )
-                    output = (test_result.stdout + test_result.stderr).strip()
-                    if output:
-                        log.write(f"  [dim]Binary test: {output[:120]}[/]")
-                    else:
-                        log.write("  [dim]Binary test: ran without output (OK)[/]")
-                except asyncio.TimeoutError:
-                    log.write("  [yellow]Warning: Binary test timed out[/]")
-                except Exception as exc:
-                    exc_str = str(exc).lower()
-                    if "cannot execute" in exc_str or "exec format" in exc_str:
-                        log.write(
-                            "  [bold red]ERROR: Binary is wrong architecture "
-                            "(e.g. ARM on x86_64)![/]")
-                    elif "shared library" in exc_str or "not found" in exc_str:
-                        log.write(
-                            f"  [bold red]ERROR: Missing library: {exc}[/]\n"
-                            f"  [dim]Install libusb-compat (Arch) or "
-                            "libusb-0.1-4 (Debian).[/]"
-                        )
-                    else:
-                        log.write(f"  [yellow]Warning: Binary test error: {exc}[/]")
-
-                self.tools_downloaded = True
-                self.query_one("#download-btn", Button).disabled = True
-
-                # Enable continue if all deps are met
-                missing = [d for d in app.dep_statuses if not d.installed]
-                if not missing:
-                    self.query_one("#continue-btn", Button).disabled = False
+        try:
+            # Write new udev rule
+            sr = await sudo_ctx.sudo_write_file(
+                UDEV_RULE_LINE + "\n", UDEV_RULES_DEST, timeout=15
+            )
+            if sr.ok:
+                self._log.write(f"[green]✓ Udev rule written to {UDEV_RULES_DEST}[/green]")
             else:
-                log.write(f"  [yellow]Warning: Binary not found at {update_bin}[/]")
-                log.write("  [dim]You may need to build it manually.[/]")
+                self._log.write(f"[yellow]⚠ Udev rule write returned {sr.returncode}[/yellow]")
 
-            app.update_status("Tool download complete")
+            # Remove old rules
+            for old_rule in OLD_UDEV_RULES:
+                if Path(old_rule).exists():
+                    sr = await sudo_ctx.sudo_run(["rm", "-f", old_rule], timeout=10)
+                    if sr.ok:
+                        self._log.write(f"  Removed old rule: {old_rule}")
+
+            # Reload udev rules
+            sr = await sudo_ctx.sudo_run(
+                ["udevadm", "control", "--reload-rules"], timeout=10
+            )
+            if sr.ok:
+                self._log.write("[green]✓ Udev rules reloaded.[/green]")
+
+            sr = await sudo_ctx.sudo_run(["udevadm", "trigger"], timeout=10)
+            if sr.ok:
+                self._log.write("[green]✓ Udev trigger executed.[/green]")
+
+            self._log.write(
+                "[yellow]Note: If USB detection fails later, reboot your computer "
+                "for udev rules to take full effect.[/yellow]"
+            )
 
         except Exception as exc:
-            log.write(f"\n[bold red]Download error:[/] {exc}")
-            logger.error("Download failed: %s", exc, exc_info=True)
+            self._log.write(f"[yellow]⚠ Udev setup warning: {exc}[/yellow]")
+            self._log.write("[yellow]USB detection may require running with sudo or rebooting.[/yellow]")
 
-    async def _go_next(self) -> None:
-        """Proceed to the next screen."""
-        app = self.app
-        if isinstance(app, LX06App):
-            await app.on_environment_done(self.check_complete and self.tools_downloaded)
+    async def _create_symlink(self) -> None:
+        """Create update.exe symlink in aml-flash-tool tools directory."""
+        config = self.app.config  # type: ignore[attr-defined]
+        tools_dir = config.tools_dir
+        aml_dir = tools_dir / AML_FLASH_TOOL_DIR
+
+        # The update binary lives at aml-flash-tool/tools/linux-x86/update
+        linux_tools = aml_dir / "tools" / "linux-x86"
+        update_src = linux_tools / "update"
+        update_exe = linux_tools / "update.exe"
+
+        self._set_status("Creating update.exe symlink...")
+
+        if not update_src.exists():
+            self._log.write(f"[yellow]⚠ update binary not found at {update_src}[/yellow]")
+            self._log.write("[yellow]Symlink creation skipped — will resolve at flash time.[/yellow]")
+            return
+
+        try:
+            # Create symlink: update.exe → update
+            if update_exe.is_symlink():
+                update_exe.unlink()
+            os.symlink("update", str(update_exe))
+            self._log.write(f"[green]✓ Symlink created: {update_exe} → update[/green]")
+        except OSError as exc:
+            # If we can't create symlink (permissions), try with sudo
+            self._log.write(f"Symlink creation failed ({exc}), trying with sudo...")
+            try:
+                sudo_ctx = self.app.sudo_ctx  # type: ignore[attr-defined]
+                sr = await sudo_ctx.sudo_run(
+                    ["ln", "-sf", "update", str(update_exe)], timeout=10
+                )
+                if sr.ok:
+                    self._log.write("[green]✓ Symlink created with sudo.[/green]")
+                else:
+                    self._log.write(f"[yellow]⚠ Sudo symlink returned {sr.returncode}[/yellow]")
+            except Exception as exc2:
+                self._log.write(f"[yellow]⚠ Symlink creation error: {exc2}[/yellow]")
