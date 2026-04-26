@@ -65,7 +65,10 @@ class AsyncDownloader:
         resume_from = 0
         if resume and output_path.exists():
             resume_from = output_path.stat().st_size
-            logger.info("Resuming download from %d bytes: %s", resume_from, output_path.name)
+            if resume_from > 0:
+                logger.info("Resuming download from %d bytes: %s", resume_from, output_path.name)
+            else:
+                resume_from = 0
 
         request_headers = dict(headers or {})
         if resume_from > 0:
@@ -79,6 +82,21 @@ class AsyncDownloader:
                 proxy=proxy_url,
                 timeout=httpx.Timeout(30.0, read=300.0),
             ) as client, client.stream("GET", url, headers=request_headers) as response:
+
+                # Handle HTTP 416 Range Not Satisfiable — delete partial and restart
+                if response.status_code == 416:
+                    logger.warning(
+                        "HTTP 416 (Range Not Satisfiable) for %s, restarting from scratch",
+                        output_path.name,
+                    )
+                    # Consume the response body to release the connection cleanly
+                    async for _ in response.aiter_bytes(self._chunk_size):
+                        pass
+
+                    # Now outside the stream context we'll retry (see below)
+                    # Signal retry by raising a sentinel
+                    raise _RetryWithoutResume()
+
                 if response.status_code not in (200, 206):
                     raise DownloadError(
                         f"HTTP {response.status_code} downloading {url}: {response.reason_phrase}"
@@ -114,6 +132,14 @@ class AsyncDownloader:
             )
             return output_path
 
+        except _RetryWithoutResume:
+            # Delete the partial file and retry from scratch
+            if output_path.exists():
+                output_path.unlink()
+                logger.info("Deleted partial file %s, retrying from scratch", output_path.name)
+            return await self.download_file(
+                url, output_path, on_progress=on_progress, headers=headers, resume=False,
+            )
         except DownloadError:
             raise
         except Exception as exc:
@@ -175,6 +201,10 @@ class AsyncDownloader:
             timeout=120,
         )
         return dest_dir
+
+
+class _RetryWithoutResume(Exception):
+    """Internal sentinel to signal a retry without resume after HTTP 416."""
 
 
 class DownloadError(Exception):

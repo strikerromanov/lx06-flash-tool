@@ -8,8 +8,8 @@ Based on the official xiaoai-patch guide and LX06 hardware reference.
 
 from __future__ import annotations
 
+import os
 from typing import Final
-
 # ─── Application ───────────────────────────────────────────────────────────────
 
 APP_NAME: Final[str] = "lx06-tool"
@@ -134,8 +134,8 @@ UPDATE_EXE_RELPATH:  Final[str] = "tools/linux-x86/update"
 
 # ─── Firmware Download ────────────────────────────────────────────────────────
 
-FIRMWARE_RELEASES_URL: Final[str] = "https://api.github.com/repos/duhow/xiaoai-patch/releases/latest"
-FIRMWARE_REPO_URL: Final[str] = "https://github.com/duhow/xiaoai-patch"
+FIRMWARE_RELEASES_URL: Final[str] = "https://api.github.com/repos/strikerromanov/lx06-flash-tool/releases/latest"
+FIRMWARE_REPO_URL: Final[str] = "https://github.com/strikerromanov/lx06-flash-tool"
 FIRMWARE_FILE_PATTERN: Final[str] = "mico_firmware_*_lx06.tar"
 
 # Files expected in firmware tarball
@@ -143,8 +143,13 @@ FIRMWARE_BOOT_FILE: Final[str] = "boot.img"
 FIRMWARE_SYSTEM_FILE: Final[str] = "root.squashfs"
 
 # Local custom firmware search paths (checked before GitHub download)
+# These use package-relative paths that work on the user's machine.
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 CUSTOM_FIRMWARE_SEARCH_PATHS: Final[list[str]] = [
-    "/a0/usr/workdir/xiaoai-patch-research/release/lx06",
+    os.path.join(_PACKAGE_DIR, "..", "..", "resources"),  # <repo>/resources/ (running from source)
+    os.path.join(_PACKAGE_DIR, "resources"),              # <package>/resources/ (installed via pip)
+    os.path.join(os.getcwd(), "resources"),               # <cwd>/resources/ (running from repo root)
 ]
 
 # Default per-user firmware directory (secondary search location)
