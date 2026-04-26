@@ -30,7 +30,7 @@ from lx06_tool.constants import (
     UDEV_RULES_DEST,
     UPDATE_EXE_RELPATH,
 )
-from lx06_tool.ui.widgets import ActionButton, LogPanel, StepProgress
+from lx06_tool.ui.widgets import ActionButton, LogPanel, PasswordInput, StepProgress
 
 
 # ─── OS Detection ──────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ class EnvironmentScreen(Screen):
                 id="env_steps",
             )
             yield Static("", id="env_status", classes="status")
-            yield LogPanel(title="Setup Log", id="env_log")
+            yield PasswordInput(id="env_password")
             with Center():
                 yield ActionButton(
                     label="Setup Environment",
@@ -155,7 +155,7 @@ class EnvironmentScreen(Screen):
                 )
 
     def on_mount(self) -> None:
-        """Auto-run setup on mount."""
+        """Initialize screen state."""
         self._setup_done = False
         self._log = self.query_one("#env_log", LogPanel)
         self._status = self.query_one("#env_status", Static)
@@ -166,6 +166,28 @@ class EnvironmentScreen(Screen):
             self._status.update(text)
         except Exception:
             pass
+
+    def on_password_input_password_submitted(self, event: PasswordInput.PasswordSubmitted) -> None:
+        """Store the sudo password when submitted."""
+        self.app.sudo_ctx.password = event.password  # type: ignore[attr-defined]
+        self._log.write("[green]Password stored.[/green]")
+
+    def _ensure_password(self) -> bool:
+        """Ensure sudo password is available, try reading from input."""
+        sudo_ctx = self.app.sudo_ctx  # type: ignore[attr-defined]
+        if sudo_ctx.has_password:
+            return True
+        try:
+            from textual.widgets import Input
+            pw_input = self.query_one("#env_password PasswordInput Input", Input)
+            pw = pw_input.value.strip()
+            if pw:
+                sudo_ctx.password = pw
+                self._log.write("[green]Password captured.[/green]")
+                return True
+        except Exception:
+            pass
+        return False
 
     # ─── Button handlers ────────────────────────────────────────────────
 
@@ -182,6 +204,12 @@ class EnvironmentScreen(Screen):
 
     async def _run_setup(self) -> None:
         """Run the full environment setup pipeline."""
+        if not self._ensure_password():
+            self._log.write("[red]Please enter your sudo password first.[/red]")
+            self._set_status("❌ Enter your sudo password first")
+            self.query_one("#setup_btn", ActionButton).set_loading(False)
+            return
+
         try:
             family, distro_name = _detect_os_family()
             self._set_status(f"Detected: {distro_name} (family: {family})")
