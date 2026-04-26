@@ -29,6 +29,7 @@ from lx06_tool.constants import (
     AB_BOOT_SLOTS,
     AB_SYSTEM_SLOTS,
     BACKUP_ORDER,
+    CUSTOM_FIRMWARE_SEARCH_PATHS,
     FIRMWARE_BOOT_FILE,
     FIRMWARE_FILE_PATTERN,
     FIRMWARE_RELEASES_URL,
@@ -36,6 +37,7 @@ from lx06_tool.constants import (
     LX06_MAX_SYSTEM_SIZE,
     PARTITION_MAP,
     SQUASHFS_MAGIC_LE,
+    USER_FIRMWARE_DIR,
 )
 from lx06_tool.ui.widgets import ActionButton, LogPanel, StepProgress, StatusLabel
 
@@ -277,17 +279,94 @@ class BackupFlashScreen(Screen):
     # ─── Phase 2: Download Firmware ─────────────────────────────────────
 
     async def _download_firmware(self) -> bool:
-        """Download latest firmware from GitHub releases.
+        """Check for local custom firmware first, then fall back to GitHub.
 
-        Returns True if firmware downloaded and validated.
+        Returns True if firmware found, extracted, and validated.
         """
         config = self.app.config  # type: ignore[attr-defined]
         build_dir = config.build_dir
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        self._set_status("Fetching latest firmware release info...")
+        self._set_status("Checking for local firmware...")
         self._log.write("[bold]Downloading firmware[/bold]")
 
+        # ── Check for local custom firmware first ──
+        local_firmware_paths = [Path(p) for p in CUSTOM_FIRMWARE_SEARCH_PATHS]
+        local_firmware_paths.append(
+            Path.home() / ".local" / "share" / "lx06-tool" / USER_FIRMWARE_DIR
+        )
+
+        for search_dir in local_firmware_paths:
+            if not search_dir.exists():
+                continue
+            tars = sorted(
+                search_dir.glob(FIRMWARE_FILE_PATTERN),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not tars:
+                continue
+
+            tar_path = tars[0]
+            self._log.write(f"[green]✓ Found local custom firmware: {tar_path.name}[/green]")
+            self._log.write(f"  Size: {tar_path.stat().st_size:,} bytes")
+
+            # Extract tarball
+            self._set_status("Extracting custom firmware...")
+            extract_dir = config.build_dir / "firmware"
+            if extract_dir.exists():
+                import shutil
+                shutil.rmtree(extract_dir)
+
+            with tarfile.open(tar_path, "r") as tar:
+                tar.extractall(extract_dir)
+
+            # Find boot.img and root.squashfs
+            boot_img = None
+            system_img = None
+            for root, dirs, files in self._walk(extract_dir):
+                for f in files:
+                    if f == FIRMWARE_BOOT_FILE:
+                        boot_img = Path(root) / f
+                    elif f == FIRMWARE_SYSTEM_FILE:
+                        system_img = Path(root) / f
+
+            if not boot_img and (extract_dir / FIRMWARE_BOOT_FILE).exists():
+                boot_img = extract_dir / FIRMWARE_BOOT_FILE
+            if not system_img and (extract_dir / FIRMWARE_SYSTEM_FILE).exists():
+                system_img = extract_dir / FIRMWARE_SYSTEM_FILE
+
+            # Validate
+            if not boot_img or not boot_img.exists():
+                self._log.write(
+                    f"[yellow]Local firmware missing {FIRMWARE_BOOT_FILE}, falling back to download.[/yellow]"
+                )
+                continue
+            if not system_img or not system_img.exists():
+                self._log.write(
+                    f"[yellow]Local firmware missing {FIRMWARE_SYSTEM_FILE}, falling back to download.[/yellow]"
+                )
+                continue
+
+            sys_size = system_img.stat().st_size
+            if sys_size > LX06_MAX_SYSTEM_SIZE:
+                self._log.write(
+                    f"[yellow]Local firmware too large ({sys_size:,} > {LX06_MAX_SYSTEM_SIZE:,}), falling back to download.[/yellow]"
+                )
+                continue
+
+            self._log.write(
+                f"[green]✓ Custom firmware validated:[/green]\n"
+                f"  boot.img: {boot_img.stat().st_size:,} bytes\n"
+                f"  root.squashfs: {sys_size:,} bytes\n"
+                f"  WiFi: R&B Slow (pre-configured)\n"
+                f"  ADB: enabled"
+            )
+            self._boot_img = boot_img
+            self._system_img = system_img
+            return True
+
+        # ── No local firmware found, download from GitHub ──
         try:
             # Fetch latest release info
             proxy = config.proxy or None

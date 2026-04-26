@@ -140,7 +140,14 @@ FIRMWARE_FILE_PATTERN: Final[str] = "mico_firmware_*_lx06.tar"
 
 # Files expected in firmware tarball
 FIRMWARE_BOOT_FILE: Final[str] = "boot.img"
-FIRMWARE_SYSTEM_FILE: Final[str] = "root.squashfs"
+
+# Local custom firmware search paths (checked before GitHub download)
+CUSTOM_FIRMWARE_SEARCH_PATHS: Final[list[str]] = [
+    "/a0/usr/workdir/xiaoai-patch-research/release/lx06",
+]
+
+# Default per-user firmware directory (secondary search location)
+USER_FIRMWARE_DIR: Final[str] = "firmware"
 
 # ─── Per-Distro Package Tables ────────────────────────────────────────────────
 
