@@ -49,10 +49,21 @@ PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
     "mtd1": {"label": "tpl",        "size": 0x800000},   #  8 MB
     "mtd2": {"label": "boot0",      "size": 0x600000},   #  6 MB
     "mtd3": {"label": "boot1",      "size": 0x600000},   #  6 MB
-    "mtd4": {"label": "system0",    "size": 0x2800000},  # 40 MB — SquashFS rootfs A
+    "mtd4": {"label": "system0",    "size": 0x2820000},  # 40.2 MB — SquashFS rootfs A
     "mtd5": {"label": "system1",    "size": 0x2800000},  # 40 MB — SquashFS rootfs B
     "mtd6": {"label": "data",       "size": 0x1400000},  # 20 MB
 }
+
+# Flashable partition size limits (for pre-flash validation)
+# Use the SMALLER of system0/system1 as the universal limit.
+LX06_PARTITION_SIZES: Final[dict[str, int]] = {
+    "boot0":      0x600000,     # 6,291,456 bytes
+    "boot1":      0x600000,     # 6,291,456 bytes
+    "system0":    0x2820000,    # 42,188,800 bytes (~40 MB)
+    "system1":    0x2800000,    # 41,943,040 bytes (~40 MB)
+    "data":       0x1400000,    # 20,971,520 bytes
+}
+LX06_MAX_SYSTEM_SIZE: Final[int] = 0x2800000  # 41,943,040 bytes (~40 MB)
 
 # Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
 # Large squashfs partitions (~26.5 MB) and data partition (20 MB) can take
@@ -260,12 +271,33 @@ SQUASHFS_MAGIC_BE: Final[bytes] = b'sqsh'   # Big-endian squashfs
 
 # ─── SquashFS Build Settings ──────────────────────────────────────────────────
 
-SQUASHFS_BLOCK_SIZE: Final[int] = 131072          # 128 KB blocks
-SQUASHFS_COMPRESSION: Final[str] = "lz4"          # Fast compression for embedded
-SQUASHFS_XATTRS: Final[bool] = True               # Preserve extended attributes
+# Use xz compression with 256K blocks for maximum size reduction.
+# The LX06 system partition is only ~40 MB; lz4 produces images too large to fit.
+SQUASHFS_BLOCK_SIZE: Final[int] = 262144          # 256 KB blocks (better compression)
+SQUASHFS_COMPRESSION: Final[str] = "xz"            # Best compression ratio for embedded
+SQUASHFS_XATTRS: Final[bool] = False              # Skip xattrs to save space
 SQUASHFS_EXCLUDE: Final[list[str]] = [             # Glob patterns to exclude from repack
     "proc/*", "sys/*", "dev/*", "run/*", "tmp/*",
     "var/log/*", "var/cache/*",
+]
+
+# Patterns for stripping unnecessary files from rootfs before repacking
+SQUASHFS_STRIP_PATTERNS: Final[list[str]] = [
+    "usr/share/doc/**/*",
+    "usr/share/man/**/*",
+    "usr/share/locale/**/*",
+    "usr/share/info/**/*",
+    "usr/share/examples/**/*",
+    "var/cache/**/*",
+    "var/log/**/*",
+    "usr/include/**/*",
+]
+
+# Extra mksquashfs flags when using xz compression
+SQUASHFS_XZ_EXTRA: Final[list[str]] = [
+    "-Xbcj", "x86",     # Branch-call-jump filter for x86 binaries
+    "-no-exports",        # Don't export NFS exports table
+    "-no-sparse",         # Don't detect sparse files
 ]
 
 # ─── Docker Image / Build ─────────────────────────────────────────────────────

@@ -18,7 +18,9 @@ from lx06_tool.constants import (
     SQUASHFS_BLOCK_SIZE,
     SQUASHFS_COMPRESSION,
     SQUASHFS_EXCLUDE,
+    SQUASHFS_STRIP_PATTERNS,
     SQUASHFS_XATTRS,
+    SQUASHFS_XZ_EXTRA,
 )
 from lx06_tool.exceptions import (
     InvalidFirmwareError,
@@ -201,6 +203,10 @@ class SquashFSTool:
             "-no-progress",
         ]
 
+        # Add xz-specific flags for better compression
+        if comp == "xz":
+            cmd.extend(SQUASHFS_XZ_EXTRA)
+
         # Add xattr support
         if SQUASHFS_XATTRS:
             cmd.append("-xattrs")
@@ -237,6 +243,39 @@ class SquashFSTool:
         size = output_path.stat().st_size
         logger.info("Created squashfs: %s (%d bytes)", output_path.name, size)
         return output_path
+
+    # ── Strip ──────────────────────────────────────────────────────────────
+
+    def strip_rootfs(self, rootfs_dir: Path) -> int:
+        """Remove unnecessary files from rootfs to reduce squashfs size.
+
+        Removes docs, man pages, locales, headers, caches, and logs
+        that aren't needed on the embedded LX06 device.
+
+        Args:
+            rootfs_dir: Path to the extracted rootfs directory.
+
+        Returns:           Number of files removed.
+        """
+        import glob as _glob
+        removed = 0
+        for pattern in SQUASHFS_STRIP_PATTERNS:
+            full_pattern = str(rootfs_dir / pattern)
+            for fpath in _glob.glob(full_pattern, recursive=True):
+                p = Path(fpath)
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        removed += 1
+                    except OSError:
+                        pass  # Permission / readonly — skip
+                elif p.is_dir() and not any(p.iterdir()):
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        pass
+        logger.info("Stripped %d unnecessary files from rootfs", removed)
+        return removed
 
     # ── Info / Validation ────────────────────────────────────────────────────
 

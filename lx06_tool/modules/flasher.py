@@ -24,6 +24,7 @@ from pathlib import Path
 
 from lx06_tool.constants import (
     FLASH_PARTITION_TIMEOUTS,
+    LX06_PARTITION_SIZES,
     MIN_SQUASHFS_SIZE_BYTES,
 )
 from lx06_tool.exceptions import FlashError
@@ -92,6 +93,16 @@ async def flash_partition(
     if image_size < max(min_size, 1):
         raise FlashError(
             f"Image is empty or too small ({image_size} bytes): {image_path}",
+            partition=partition_label,
+        )
+
+    # Validate image fits within partition
+    max_size = LX06_PARTITION_SIZES.get(partition_label)
+    if max_size and image_size > max_size:
+        raise FlashError(
+            f"Image too large for {partition_label}: "
+            f"{image_size:,} bytes > {max_size:,} bytes partition. "
+            f"Reduce customization options or use higher compression.",
             partition=partition_label,
         )
 

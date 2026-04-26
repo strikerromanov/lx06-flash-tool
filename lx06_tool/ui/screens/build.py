@@ -335,13 +335,26 @@ class BuildScreen(Screen):
             on_step("Firmware build complete!", 100)
             log.write("\n[bold green]Custom firmware built successfully![/]")
             if result.output_system:
+                from lx06_tool.constants import LX06_MAX_SYSTEM_SIZE
+                img_bytes = result.output_system.stat().st_size
+                img_mb = img_bytes / (1024 * 1024)
+                limit_mb = LX06_MAX_SYSTEM_SIZE / (1024 * 1024)
+                fits = img_bytes <= LX06_MAX_SYSTEM_SIZE
+                status = "[green]\u2713[/]" if fits else "[red]\u2717[/]"
+                label = "fits in" if fits else "EXCEEDS"
                 log.write(f"  Output: {result.output_system}")
-                log.write(f"  Size: {result.output_system.stat().st_size:,} bytes")
+                log.write(
+                    f"  {status} root.squashfs: {img_bytes:,} bytes "
+                    f"({img_mb:.1f} MB) — {label} {LX06_MAX_SYSTEM_SIZE:,} bytes "
+                    f"({limit_mb:.1f} MB) partition"
+                )
+                if not fits:
+                    log.write("  [bold red]The image will NOT fit on the device![/]")
+                    log.write("  [yellow]Try disabling some customization options.[/]")
             if result.warnings:
                 log.write(f"\n[yellow]Warnings ({len(result.warnings)}):[/]")
                 for w in result.warnings:
                     log.write(f"  [yellow]\u2022[/] {w}")
-
             self.query_one("#continue-btn", Button).disabled = False
             app.update_status("Build complete")
 

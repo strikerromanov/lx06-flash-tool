@@ -317,6 +317,12 @@ class FirmwareOrchestrator:
                     details="sudo pacman -S squashfs-tools",
                 )
 
+            # Strip unnecessary files to reduce squashfs size
+            step("strip", "Stripping unnecessary files...")
+            removed = self._squashfs.strip_rootfs(self._paths.rootfs_dir)
+            if on_output:
+                on_output("stdout", f"Stripped {removed} unnecessary files from rootfs")
+
             self._paths.output_dir.mkdir(parents=True, exist_ok=True)
             await self._squashfs.repack(
                 rootfs_dir=self._paths.rootfs_dir,
@@ -325,12 +331,26 @@ class FirmwareOrchestrator:
             )
             result.output_system = self._paths.output_system
             result.steps_completed.append("repack")
+
+            image_size = self._paths.output_system.stat().st_size
             if on_output:
-                size = self._paths.output_system.stat().st_size
                 on_output(
                     "stdout",
-                    f"✅ Repacked: {self._paths.output_system.name} ({size:,} bytes)",
+                    f"✅ Repacked: {self._paths.output_system.name} ({image_size:,} bytes)",
                 )
+
+            # Validate image fits within partition
+            from lx06_tool.constants import LX06_MAX_SYSTEM_SIZE
+            if image_size > LX06_MAX_SYSTEM_SIZE:
+                msg = (
+                    f"Image too large: {image_size:,} bytes > "
+                    f"{LX06_MAX_SYSTEM_SIZE:,} bytes partition limit. "
+                    f"The image will NOT fit on the device! "
+                    f"Try disabling some customization options."
+                )
+                result.warnings.append(msg)
+                if on_output:
+                    on_output("stdout", f"⚠️ {msg}")
         except Exception as exc:
             result.steps_failed.append("repack")
             raise FirmwareError(f"Repack failed: {exc}") from exc
