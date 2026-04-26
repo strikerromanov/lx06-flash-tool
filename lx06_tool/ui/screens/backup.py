@@ -241,6 +241,7 @@ class BackupScreen(Screen):
 
             # Step 2: Dump all partitions
             log.write("\n[bold blue]Step 2: Dumping MTD partitions...[/]")
+            log.write("[dim]Device may restart during dumps - tool will continue automatically.[/]")
 
             skipped: list[str] = []
             def on_partition_start(mtd_name: str, label: str) -> None:

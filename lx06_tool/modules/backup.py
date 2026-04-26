@@ -134,7 +134,7 @@ async def dump_all_partitions(
         backup_dir=backup_dir,
     )
 
-    for mtd_name, meta in PARTITION_MAP.items():
+    for idx, (mtd_name, meta) in enumerate(PARTITION_MAP.items()):
         label  = str(meta["label"])
         output = backup_dir / f"{mtd_name}_{label}.img"
 
@@ -150,6 +150,16 @@ async def dump_all_partitions(
 
             if on_partition_done:
                 on_partition_done(part)
+
+            # Check device connection after each partition (except last)
+            if idx < len(PARTITION_MAP) - 1:
+                try:
+                    check = await tool.bulkcmd("echo ping", timeout=5, sudo_password=sudo_password)
+                    if check.returncode != 0:
+                        logger.warning("Device not responding after %s dump (may have restarted)", mtd_name)
+                except Exception as exc:
+                    logger.warning("Connection check failed after %s dump: %s", mtd_name, exc)
+
         except (PartitionDumpError, Exception) as exc:
             reason = str(exc)
             # Log the failure but continue with remaining partitions
