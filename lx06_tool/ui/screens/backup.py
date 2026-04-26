@@ -225,12 +225,36 @@ class BackupScreen(Screen):
 
             # Step 1: Unlock bootloader via AmlogicTool directly
             log.write("[bold blue]Step 1: Unlocking bootloader...[/]")
+            log.write("[dim]Setting bootdelay=15 for recovery access...[/]")
             progress.update(progress=5)
 
             try:
                 # Set bootdelay for recovery access
+                log.write("[dim]→ Calling setenv...[/]")
                 await tool.setenv("bootdelay", "15", sudo_password=pw)
+                log.write("[dim]→ setenv completed[/]")
+
+                log.write("[dim]→ Calling saveenv (this may trigger device reset)...[/]")
+                log.write("[yellow]⚠ WARNING: Some devices auto-restart after saveenv![/]")
                 await tool.saveenv(sudo_password=pw)
+                log.write("[dim]→ saveenv completed[/]")
+
+                # Add delay to let device stabilize if it restarted
+                import asyncio
+                log.write("[dim]→ Waiting 5 seconds for device to stabilize...[/]")
+                await asyncio.sleep(5)
+
+                # Check if device is still connected
+                log.write("[dim]→ Checking device connection...[/]")
+                try:
+                    check_result = await tool.bulkcmd("echo ping", timeout=5, sudo_password=pw)
+                    if check_result.returncode == 0:
+                        log.write("[green]→ Device still connected ✓[/]")
+                    else:
+                        log.write("[yellow]→ Device not responding properly[/]")
+                except Exception as exc:
+                    log.write(f"[yellow]→ Device may have restarted: {exc}[/]")
+                    log.write("[dim]→ Will attempt to continue - device may reconnect during dumps[/]")
 
                 # Verify by reading back
                 from lx06_tool.utils.runner import run
@@ -265,6 +289,7 @@ class BackupScreen(Screen):
 
             # Step 2: Dump all partitions
             log.write("\n[bold blue]Step 2: Dumping MTD partitions...[/]")
+            log.write("[dim]Starting USB monitoring to prevent disconnections...[/]")
 
             # Start USB monitoring for the entire dump sequence
             from lx06_tool.utils.usb_monitor import USBSafetyGuard
@@ -272,7 +297,7 @@ class BackupScreen(Screen):
             async with USBSafetyGuard(
                 tool,
                 keep_alive_interval=30.0,  # Send keep-alive every 30 seconds
-                on_disconnect=lambda: log.write("[bold red]Device disconnected during backup![/]"),
+                on_disconnect=lambda: log.write("[bold red]⚠ Device disconnected during backup![/]"),
             ):
                 skipped: list[str] = []
                 def on_partition_start(mtd_name: str, label: str) -> None:
@@ -286,6 +311,7 @@ class BackupScreen(Screen):
                     log.write(f"  [yellow]\u26a0 Skipped {mtd_name}: {reason}[/]")
 
                 # Pass sudo_password for partition dump operations
+                log.write("[dim]Initiating partition dumps (this may take several minutes)...[/]")
                 backup_set = await dump_all_partitions(
                     tool=tool,
                     backup_dir=backup_dir,
@@ -295,7 +321,7 @@ class BackupScreen(Screen):
                     sudo_password=pw,
                 )
 
-                    # Update progress for each partition dumped
+                # Update progress for each partition dumped
                 num_partitions = len(backup_set.partitions)
                 for i, (mtd_name, part) in enumerate(backup_set.partitions.items()):
                     log.write(f"  [green]\u2713[/] {mtd_name} ({part.label}): {part.size_bytes:,} bytes")
@@ -328,6 +354,19 @@ class BackupScreen(Screen):
 
             # Store backup set in app config
             app.config.backup = backup_set
+
+            # Final device connection check
+            log.write("\n[dim]Checking device connection after backup...[/]")
+            try:
+                check_result = await tool.bulkcmd("echo ping", timeout=5, sudo_password=pw)
+                if check_result.returncode == 0:
+                    log.write("[green]✓ Device still connected after backup[/]")
+                else:
+                    log.write("[yellow]⚠ Device not responding after backup (may have restarted)[/]")
+            except Exception as exc:
+                log.write(f"[yellow]⚠ Device connection check failed: {exc}[/]")
+                log.write("[dim]If device restarted, you may need to reconnect for the next phase.[/]")
+
 
             # Generate and display report
             report = generate_backup_report(backup_set)
