@@ -255,7 +255,12 @@ def generate_backup_report(backup_set: BackupSet) -> str:
     lines.append(f"  Partitions Backed Up: {len(backup_set.partitions)}")
     lines.append("")
     lines.append("  " + "-" * 66)
-    lines.append(f"  {'Partition':<12} {'Label':<12} {'Size (MB)':<12} {'SHA256':<8} {'Verified':<10}")
+    # Table header for partition info
+    header = (
+        f"  {'Partition':<12} {'Label':<12} {'Size (MB)':<12} "
+        f"{'SHA256':<8} {'Verified':<10}"
+    )
+    lines.append(header)
     lines.append("  " + "-" * 66)
 
     # Sort partitions by name for consistent output

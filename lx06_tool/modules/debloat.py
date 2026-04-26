@@ -18,6 +18,7 @@ leaving broken symlinks or half-configured services.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 from collections.abc import Callable
@@ -410,13 +411,9 @@ class DebloatEngine:
     def _dir_size(path: Path) -> int:
         """Calculate total size of a directory tree."""
         total = 0
-        try:
+        with contextlib.suppress(Exception):
             for p in path.rglob("*"):
                 if p.is_file():
-                    try:
+                    with contextlib.suppress(OSError):
                         total += p.stat().st_size
-                    except OSError:
-                        pass
-        except Exception:
-            pass
         return total

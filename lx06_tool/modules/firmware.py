@@ -15,11 +15,13 @@ and ai_brain.py to apply the user's selections.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lx06_tool.config import CustomizationChoices
 from lx06_tool.exceptions import (
@@ -28,6 +30,9 @@ from lx06_tool.exceptions import (
 )
 from lx06_tool.modules.ai_brain import AIBrainInstaller
 from lx06_tool.modules.debloat import DebloatEngine
+
+if TYPE_CHECKING:
+    from lx06_tool.utils.amlogic import AmlogicTool
 from lx06_tool.modules.docker_builder import DockerBuilder
 from lx06_tool.modules.media_suite import MediaSuiteInstaller
 from lx06_tool.utils.compat import AsyncRunner
@@ -197,7 +202,13 @@ class FirmwareOrchestrator:
             step("debloat", "Skipped (not selected)")
 
         # Step 4: Install media suite
-        if any([self._choices.install_airplay, self._choices.install_dlna, self._choices.install_spotify, self._choices.install_snapcast]):
+        media_choices = [
+            self._choices.install_airplay,
+            self._choices.install_dlna,
+            self._choices.install_spotify,
+            self._choices.install_snapcast,
+        ]
+        if any(media_choices):
             step("media", "Installing media suite...")
             try:
                 installer = MediaSuiteInstaller(
@@ -308,10 +319,8 @@ class FirmwareOrchestrator:
         if path.exists():
             for p in path.rglob("*"):
                 if p.is_file():
-                    try:
+                    with contextlib.suppress(OSError):
                         total += p.stat().st_size
-                    except OSError:
-                        pass
         return total
 
     @staticmethod
