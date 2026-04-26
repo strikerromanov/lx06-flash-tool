@@ -447,7 +447,7 @@ class AmlogicTool:
 
         if result.ok and output_path.exists() and output_path.stat().st_size > 0:
             log.info("[DUMP] Attempt 1 SUCCEEDED: %d bytes", output_path.stat().st_size)
-            self._post_validate(output_path, partition_label)
+            await self._post_validate(output_path, partition_label)
             return output_path
 
         log.warning("[DUMP] Attempt 1 failed (RC=%s, exists=%s): %s",
@@ -462,7 +462,7 @@ class AmlogicTool:
 
         if result.ok and output_path.exists() and output_path.stat().st_size > 0:
             log.info("[DUMP] Attempt 2 SUCCEEDED: %d bytes", output_path.stat().st_size)
-            self._post_validate(output_path, partition_label)
+            await self._post_validate(output_path, partition_label)
             return output_path
 
         log.warning("[DUMP] Attempt 2 failed (RC=%s)",
@@ -477,7 +477,7 @@ class AmlogicTool:
 
             if result.ok and output_path.exists() and output_path.stat().st_size > 0:
                 log.info("[DUMP] Attempt 3 SUCCEEDED: %d bytes", output_path.stat().st_size)
-                self._post_validate(output_path, partition_label)
+                await self._post_validate(output_path, partition_label)
                 return output_path
 
             log.warning("[DUMP] Attempt 3 failed (RC=%s)",
@@ -496,7 +496,7 @@ class AmlogicTool:
                 if output_path.exists() and output_path.stat().st_size > 0:
                     log.info("[DUMP] Chunked fallback SUCCEEDED: %d bytes",
                              output_path.stat().st_size)
-                    self._post_validate(output_path, partition_label)
+                    await self._post_validate(output_path, partition_label)
                     return output_path
             except Exception as exc:
                 log.error("[DUMP] Chunked fallback failed: %s", exc)

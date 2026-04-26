@@ -141,7 +141,7 @@ DOCKER_BUILD_IMAGE: Final[str] = "lx06-firmware-builder:latest"
 #   - docker-buildx       → pacman (extra) — needed for multi-arch builds
 #   - base-devel          → needed to build AUR packages / compile tools
 #
-DISTRO_PACKAGES: Final[dict[str, dict[str, str]]] = {
+DISTRO_PACKAGES: Final[dict[str, dict[str, str | None]]] = {
     "debian": {
         "git":            "git",
         "libusb":         "libusb-0.1-4",
