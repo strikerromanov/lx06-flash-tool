@@ -25,6 +25,7 @@ from lx06_tool.constants import (
     PARTITION_MAP,
     PARTITION_TIMEOUTS,
     READ_ONLY_PARTITIONS,
+    SKIP_BACKUP_PARTITIONS,
 )
 from lx06_tool.exceptions import (
     BackupIncompleteError,
@@ -148,6 +149,17 @@ async def dump_all_partitions(
             )
             if on_partition_skip:
                 on_partition_skip(mtd_name, f"Read-only partition - {label} not needed for backup")
+            continue
+
+        # Skip inactive A/B slot partitions and data — not needed for rebuild
+        # system1 is inactive (empty/garbage), boot1 is inactive, data not needed
+        if label in SKIP_BACKUP_PARTITIONS:
+            logger.info(
+                "[BACKUP] Skipping '%s' (%s) - inactive slot or not needed for rebuild",
+                mtd_name, label
+            )
+            if on_partition_skip:
+                on_partition_skip(mtd_name, f"Inactive/not needed - {label}")
             continue
 
         output = backup_dir / "{}_{}.img".format(mtd_name, label)

@@ -98,6 +98,12 @@ AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
 # Partitions that are read-only references (bootloader / tpl) — never flash these
 READ_ONLY_PARTITIONS: Final[frozenset[str]] = frozenset({"bootloader", "tpl"})
 
+# Partitions to skip during backup — inactive A/B slot (empty/garbage) or not needed
+# system1 is the inactive slot and contains no valid filesystem
+# boot1 is the inactive boot slot — not needed for rebuild
+# data partition is not needed for firmware customization
+SKIP_BACKUP_PARTITIONS: Final[frozenset[str]] = frozenset({"system1", "boot1", "data"})
+
 # ─── aml-flash-tool / update.exe ─────────────────────────────────────────────
 
 AML_FLASH_TOOL_REPO: Final[str] = "https://github.com/radxa/aml-flash-tool.git"
