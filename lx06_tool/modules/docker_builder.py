@@ -16,14 +16,14 @@ Using Docker for firmware builds isolates the host system from:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-from lx06_tool.constants import DOCKERFILE_PATH, FIRMWARE_BUILDER_IMAGE
+from lx06_tool.constants import FIRMWARE_BUILDER_IMAGE, DOCKERFILE_PATH
 from lx06_tool.exceptions import DockerBuildError
-from lx06_tool.utils.compat import AsyncRunner
 from lx06_tool.utils.docker_utils import DockerUtils
+from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)
 
@@ -250,29 +250,51 @@ class DockerBuilder:
         Raises:
             DockerBuildError: If repack fails.
         """
+        import time as _time
+
         output_dir = output_squashfs.parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        mksquashfs_cmd = (
-            f"mksquashfs /firmware {output_squashfs.name} "
-            f"-comp lz4 -Xhc -noappend -root-owned"
-        )
+        # Build the mksquashfs command to run inside the container
+        container_output = f"/output/{output_squashfs.name}"
+        mksquashfs_cmd = [
+            "mksquashfs",
+            "/firmware",
+            container_output,
+            "-comp", "lz4", "-Xhc",
+            "-noappend",
+            "-no-progress",
+            "-root-owned",
+            "-no-xattrs",
+        ]
 
-        env_vars = {
-            "MKSQUASHFS_CMD": mksquashfs_cmd,
-        }
+        start = _time.monotonic()
 
-        build_result = await self.run_build(
-            firmware_dir=rootfs_dir,
-            output_dir=output_dir,
-            env_vars=env_vars,
+        # Run directly via runner (not through run_build which has wrong defaults)
+        cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{rootfs_dir.resolve()}:/firmware:rw",
+            "-v", f"{output_dir.resolve()}:/output:rw",
+            FIRMWARE_BUILDER_IMAGE,
+        ] + mksquashfs_cmd
+
+        logger.info("Running Docker squashfs repack: %s", " ".join(cmd[:8]))
+        if on_output:
+            on_output("stdout", "Starting containerized squashfs repack...")
+
+        result = await self._runner.run(
+            cmd,
+            timeout=600,
             on_output=on_output,
+            sudo=False,  # Docker handles its own permissions
         )
 
-        if not build_result.success:
+        duration = _time.monotonic() - start
+
+        if not result.success:
             raise DockerBuildError(
-                "SquashFS repack failed in Docker container",
-                details=build_result.logs[:500],
+                f"SquashFS repack failed in Docker container (rc={result.returncode})",
+                details=result.stderr[:500],
             )
 
         if not output_squashfs.exists():
@@ -282,7 +304,7 @@ class DockerBuilder:
             )
 
         logger.info(
-            "SquashFS repacked: %s (%d bytes)",
-            output_squashfs, output_squashfs.stat().st_size,
+            "SquashFS repacked in %.1fs: %s (%d bytes)",
+            duration, output_squashfs, output_squashfs.stat().st_size,
         )
         return output_squashfs

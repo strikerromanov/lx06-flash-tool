@@ -1,8 +1,6 @@
-FROM arm64v8/ubuntu:22.04
-RUN apt-get update && apt-get install -y \
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
     squashfs-tools \
-    python3 \
-    pip \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 ENTRYPOINT ["/bin/bash"]

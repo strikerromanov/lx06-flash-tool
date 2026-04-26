@@ -335,6 +335,20 @@ class FirmwareOrchestrator:
             result.steps_failed.append("repack")
             raise FirmwareError(f"Repack failed: {exc}") from exc
 
+        # Fix ownership of output files so user can access them
+        try:
+            import os
+            uid = os.getuid()
+            gid = os.getgid()
+            if uid != 0:  # Don't chown if running as root
+                await self._runner.run(
+                    ["chown", "-R", f"{uid}:{gid}", str(self._paths.output_dir)],
+                    timeout=30,
+                )
+        except Exception as chown_exc:
+            logger.warning("Could not fix output ownership: %s", chown_exc)
+
+
         # Step 7: Validate output
         step("validate_output", "Validating output...")
         if self._paths.output_system.exists():
