@@ -141,6 +141,7 @@ class EnvironmentScreen(Screen):
             )
             yield Static("", id="env_status", classes="status")
             yield PasswordInput(id="env_password")
+            yield LogPanel(title="Setup Log", id="env_log")
             with Center():
                 yield ActionButton(
                     label="Setup Environment",
