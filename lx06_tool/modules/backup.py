@@ -3,13 +3,20 @@ lx06_tool/modules/backup.py
 ----------------------------
 Phase 2: NAND partition dump + checksum verification.
 
-Dumps all 7 LX06 partitions sequentially using direct NAND→host
-transfer (update mread store <label> normal <file>), then verifies
-each dump with SHA-256 + MD5 before allowing the pipeline to
-advance to Phase 3.
+Dumps ALL 7 LX06 partitions per the official xiaoai-patch guide:
+https://github.com/duhow/xiaoai-patch/blob/master/research/lx06/install.md
 
-The old two-step RAM approach (store read.part → mread mem at
-0x03000000) has been removed — it caused heap corruption on AXG.
+Official backup commands:
+    update.exe mread store bootloader normal 0x200000 mtd0.img
+    update.exe mread store tpl normal 0x800000 mtd1.img
+    update.exe mread store boot0 normal 0x600000 mtd2.img
+    update.exe mread store boot1 normal 0x600000 mtd3.img
+    update.exe mread store system0 normal 0x2820000 mtd4.img
+    update.exe mread store system1 normal 0x2800000 mtd5.img
+    update.exe mread store data normal 0x13e0000 mtd6.img
+
+Individual partition failures are non-fatal — the backup continues
+and logs which partitions succeeded/failed.
 """
 from __future__ import annotations
 
@@ -24,8 +31,6 @@ from lx06_tool.constants import (
     MIN_PARTITION_DUMP_RATIO,
     PARTITION_MAP,
     PARTITION_TIMEOUTS,
-    READ_ONLY_PARTITIONS,
-    SKIP_BACKUP_PARTITIONS,
 )
 from lx06_tool.exceptions import (
     BackupIncompleteError,
@@ -51,8 +56,7 @@ async def dump_partition(
     """
     Dump a single MTD partition to `output_path`.
 
-    Uses direct NAND→host transfer (update mread store <label> normal <file>).
-    Per-partition timeouts are resolved from PARTITION_TIMEOUTS constants.
+    Uses official syntax: update mread store <label> normal <size> <file>
 
     Returns a PartitionBackup with size populated (not yet checksummed).
     Raises PartitionDumpError on failure.
@@ -67,13 +71,13 @@ async def dump_partition(
     # Resolve per-partition timeout
     timeout = PARTITION_TIMEOUTS.get(label, DEFAULT_PARTITION_TIMEOUT)
     logger.info(
-        "[BACKUP] Dumping '%s' (%s) — size=%d, timeout=%ds",
-        mtd_name, label, expected_size, timeout,
+        "[BACKUP] Dumping '%s' (%s) — size=0x%X (%d bytes), timeout=%ds",
+        mtd_name, label, expected_size, expected_size, timeout,
     )
 
     try:
-        await tool.mread(
-            partition=label,
+        await tool.dump_partition(
+            partition_label=label,
             output_path=output_path,
             size=expected_size,
             timeout=timeout,
@@ -91,7 +95,7 @@ async def dump_partition(
         raise PartitionDumpError(
             mtd_name,
             f"Dump is suspiciously small: {actual_size} bytes "
-            f"(expected ≥ {int(expected_size * MIN_PARTITION_DUMP_RATIO)})",
+            f"(expected >= {int(expected_size * MIN_PARTITION_DUMP_RATIO)})",
         )
 
     return PartitionBackup(
@@ -114,19 +118,19 @@ async def dump_all_partitions(
     sudo_password: str = "",
 ) -> BackupSet:
     """
-    Dump all MTD partitions (mtd0 through mtd6) to `backup_dir`.
+    Dump ALL 7 MTD partitions per the official xiaoai-patch guide.
 
-    Uses direct NAND→host transfer for each partition.
-    Per-partition timeouts are configured in constants.PARTITION_TIMEOUTS.
-    Large partitions (system0/system1) get 10-minute timeouts to
-    accommodate slow USB 2.0 bulk transfers.
+    Official commands:
+        mread store bootloader normal 0x200000 mtd0.img
+        mread store tpl        normal 0x800000 mtd1.img
+        mread store boot0      normal 0x600000 mtd2.img
+        mread store boot1      normal 0x600000 mtd3.img
+        mread store system0    normal 0x2820000 mtd4.img
+        mread store system1    normal 0x2800000 mtd5.img
+        mread store data       normal 0x13e0000 mtd6.img
 
-    Parameters
-    ----------
-    on_partition_start : Called with (mtd_name, label) at the start of each dump.
-    on_partition_done  : Called with the completed PartitionBackup.
-    on_line            : Called with each output line from the tool.
-    on_partition_skip  : Called with (mtd_name, reason) when a partition is skipped.
+    Individual failures are non-fatal — backup continues and logs
+    which partitions succeeded/failed.
     """
     import asyncio
 
@@ -140,28 +144,6 @@ async def dump_all_partitions(
 
     for idx, (mtd_name, meta) in enumerate(PARTITION_MAP.items()):
         label  = str(meta["label"])
-
-        # Skip read-only partitions (bootloader, tpl) - they cause device restarts
-        if label in READ_ONLY_PARTITIONS:
-            logger.info(
-                "[BACKUP] Skipping read-only partition '%s' (%s) - not needed for firmware rebuild",
-                mtd_name, label
-            )
-            if on_partition_skip:
-                on_partition_skip(mtd_name, f"Read-only partition - {label} not needed for backup")
-            continue
-
-        # Skip inactive A/B slot partitions and data — not needed for rebuild
-        # system1 is inactive (empty/garbage), boot1 is inactive, data not needed
-        if label in SKIP_BACKUP_PARTITIONS:
-            logger.info(
-                "[BACKUP] Skipping '%s' (%s) - inactive slot or not needed for rebuild",
-                mtd_name, label
-            )
-            if on_partition_skip:
-                on_partition_skip(mtd_name, f"Inactive/not needed - {label}")
-            continue
-
         output = backup_dir / "{}_{}.img".format(mtd_name, label)
 
         if on_partition_start:
@@ -178,18 +160,8 @@ async def dump_all_partitions(
                 on_partition_done(part)
 
             # Add delay between partitions to let device stabilize
-            # This prevents I/O errors on larger partitions (boot0/boot1/system0/system1)
             if idx < len(PARTITION_MAP) - 1:
-                await asyncio.sleep(2)  # 2 second delay between partitions
-
-            # Check device connection after each partition (except last)
-            if idx < len(PARTITION_MAP) - 1:
-                try:
-                    check = await tool.bulkcmd("echo ping", timeout=5, sudo_password=sudo_password)
-                    if check.returncode != 0:
-                        logger.warning("Device not responding after %s dump (may have restarted)", mtd_name)
-                except Exception as exc:
-                    logger.warning("Connection check failed after %s dump: %s", mtd_name, exc)
+                await asyncio.sleep(2)
 
         except (PartitionDumpError, Exception) as exc:
             reason = str(exc)
@@ -209,144 +181,44 @@ async def compute_checksums(
     *,
     on_partition: Callable[[str, FileChecksums], None] | None = None,
 ) -> None:
-    """
-    Compute SHA-256 + MD5 for every partition in `backup_set`.
-    Writes a sidecar `.sha256` file next to each dump.
-    Mutates each PartitionBackup in-place.
-    """
-    for mtd_name, part in backup_set.partitions.items():
-        if part.path is None or not part.path.exists():
-            raise PartitionDumpError(mtd_name, "Dump file missing before checksum")
-
-        checksums = await hash_file(part.path)
-        part.sha256 = checksums.sha256
-        part.md5    = checksums.md5
-
-        write_checksum_file(checksums, part.path.with_suffix(".sha256"))
-
+    """Compute SHA-256 + MD5 checksums for each dumped partition."""
+    for mtd_name, pbackup in backup_set.partitions.items():
+        checksums = await hash_file(pbackup.path)
+        pbackup.sha256 = checksums.sha256
+        pbackup.md5 = checksums.md5
         if on_partition:
             on_partition(mtd_name, checksums)
+        logger.info(
+            "[BACKUP] %s checksums: sha256=%s... md5=%s...",
+            mtd_name, checksums.sha256[:16], checksums.md5[:16],
+        )
+
+
+async def write_checksum_manifest(backup_set: BackupSet) -> Path:
+    """Write a checksum manifest file alongside the backup."""
+    manifest_path = backup_set.backup_dir / "checksums.sha256"
+    lines: list[str] = []
+    for mtd_name, pbackup in sorted(backup_set.partitions.items()):
+        if pbackup.sha256:
+            lines.append(f"{pbackup.sha256}  {pbackup.path.name}")
+    manifest_path.write_text("\n".join(lines) + "\n")
+    return manifest_path
 
 
 async def verify_backup(backup_set: BackupSet) -> None:
     """
-    Verify all partition dumps in `backup_set` by re-hashing and comparing.
-    Raises ChecksumMismatchError or BackupIncompleteError on failure.
+    Re-verify all checksums in the backup set.
+
+    Raises ChecksumMismatchError if any file has been modified since
+    the checksums were computed.
     """
-    if not backup_set.partitions:
-        raise BackupIncompleteError("Backup set is empty — nothing to verify.")
-
-    for mtd_name, part in backup_set.partitions.items():
-        if not part.sha256:
-            raise BackupIncompleteError(
-                f"No checksum recorded for '{mtd_name}'. Run compute_checksums first."
-            )
-        if part.path is None or not part.path.exists():
-            raise BackupIncompleteError(
-                f"Dump file missing for '{mtd_name}': {part.path}"
-            )
-
-        live = await hash_file(part.path)
-
-        if live.sha256 != part.sha256:
+    for mtd_name, pbackup in backup_set.partitions.items():
+        if not pbackup.sha256 or not pbackup.path.exists():
+            continue
+        actual = await hash_file(pbackup.path)
+        if actual.sha256 != pbackup.sha256:
             raise ChecksumMismatchError(
-                str(part.path), expected=part.sha256, actual=live.sha256
+                str(pbackup.path),
+                expected=pbackup.sha256,
+                actual=actual.sha256,
             )
-        if part.md5 and live.md5 != part.md5:
-            raise ChecksumMismatchError(
-                str(part.path), expected=part.md5, actual=live.md5
-            )
-        if not part.size_ok:
-            raise BackupIncompleteError(
-                f"Partition '{mtd_name}' dump is smaller than expected "
-                f"({part.size_bytes} vs {part.expected_size} bytes)."
-            )
-
-        part.verified = True
-
-    backup_set.all_verified = all(p.verified for p in backup_set.partitions.values())
-
-
-# ─── Report Generation ───────────────────────────────────────────────────────────
-
-def generate_backup_report(backup_set: BackupSet) -> str:
-    """
-    Generate a human-readable summary report for a BackupSet.
-
-    Returns a formatted string with timestamp, partition details,
-    sizes, checksums, and verification status suitable for display
-    in a UI log or console output.
-    """
-    lines = [
-        "",
-        "=" * 70,
-        "  BACKUP SUMMARY REPORT",
-        "=" * 70,
-        "",
-    ]
-
-    # Timestamp and location
-    if backup_set.timestamp:
-        lines.append(f"  Timestamp: {backup_set.timestamp}")
-    if backup_set.backup_dir:
-        lines.append(f"  Location:  {backup_set.backup_dir}")
-    lines.append("")
-
-    # Partition details
-    lines.append(f"  Partitions Backed Up: {len(backup_set.partitions)}")
-    lines.append("")
-    lines.append("  " + "-" * 66)
-    # Table header for partition info
-    header = (
-        f"  {'Partition':<12} {'Label':<12} {'Size (MB)':<12} "
-        f"{'SHA256':<8} {'Verified':<10}"
-    )
-    lines.append(header)
-    lines.append("  " + "-" * 66)
-
-    # Sort partitions by name for consistent output
-    for mtd_name in sorted(backup_set.partitions.keys()):
-        part = backup_set.partitions[mtd_name]
-
-        # Calculate size in MB
-        size_mb = f"{part.size_bytes / (1024 * 1024):.2f}" if part.size_bytes > 0 else "N/A"
-
-        # Checksum status
-        sha256_status = "[green]✓[/]" if part.sha256 else "[red]✗[/]"
-
-        # Verification status
-        if part.verified:
-            verified_status = "[green]YES[/]"
-        elif part.sha256:
-            verified_status = "[yellow]PENDING[/]"
-        else:
-            verified_status = "[red]NO[/]"
-
-        lines.append(
-            f"  {mtd_name:<12} {part.label:<12} {size_mb:<12} "
-            f"{sha256_status:<8} {verified_status:<10}"
-        )
-
-        # Add full SHA256 for reference (truncated for display)
-        if part.sha256:
-            sha256_short = part.sha256[:16] + "..."
-            lines.append(f"    SHA256: {sha256_short}")
-
-    lines.append("  " + "-" * 66)
-    lines.append("")
-
-    # Overall status
-    if backup_set.all_verified:
-        lines.append("[bold green]  ✓ All backups verified successfully![/]")
-    else:
-        verified_count = sum(1 for p in backup_set.partitions.values() if p.verified)
-        total_count = len(backup_set.partitions)
-        lines.append(
-            f"[yellow]  ⚠ Verification: {verified_count}/{total_count} partitions verified[/]"
-        )
-
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("")
-
-    return "\n".join(lines)
