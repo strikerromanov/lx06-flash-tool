@@ -167,7 +167,7 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
     """Execute a command via sudo, trying multiple approaches.
 
     Attempt order:
-      1. Plain sudo (works when root or NOPASSWD)
+      1. Plain sudo (only if no password — works when root or NOPASSWD)
       2. sudo -S with password piped via stdin
       3. PTY-based execution (os.forkpty) for strict PAM configs
 
@@ -181,56 +181,55 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
     deadline = time.monotonic() + timeout
 
     # --- Attempt 1: Plain sudo (no password) ---
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        log_err(cmd, -1, "sudo cascade: no time remaining")
-        return SudoResult(returncode=-1, output="Command timed out (cascade timeout)", password_sent=False)
-
-    tier_timeout = min(_TIER_TIMEOUT, remaining)
-    log_debug("INFO", f"sudo tier 1: plain sudo (timeout={tier_timeout:.0f}s)")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *full_cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=tier_timeout
-        )
-        if proc.returncode == 0:
-            log_ok(cmd, 0, stdout.decode(errors="replace").strip()[:200])
-            return SudoResult(
-                returncode=0,
-                output=stdout.decode(errors="replace").strip(),
-                password_sent=False,
-            )
-
-        # Check if it failed because of password requirement
-        err_text = stderr.decode(errors="replace")
-        needs_pw = _needs_password(err_text)
-        if not needs_pw:
-            # Failed for another reason (command not found, etc.)
-            combined = (stdout + stderr).decode(errors="replace").strip()
-            log_err(cmd, proc.returncode or 1, combined[:200])
-            return SudoResult(
-                returncode=proc.returncode or 1,
-                output=combined,
-                password_sent=False,
-            )
-        # Fast-fail: needs password, skip to next tier immediately
-        log_debug("INFO", "sudo tier 1: needs password (fast-fail), moving to tier 2")
-    except asyncio.TimeoutError:
-        log_debug("INFO", f"sudo tier 1: timed out after {tier_timeout:.0f}s")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    except Exception as exc:
-        log_debug("INFO", f"sudo tier 1 exception: {exc}")
-
-    # No password available and sudo needs one
+    # Skip entirely if we have a password — plain sudo with DEVNULL stdin
+    # hangs on CachyOS when a password is actually needed.
     if not password:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            tier_timeout = min(_TIER_TIMEOUT, remaining)
+            log_debug("INFO", f"sudo tier 1: plain sudo (timeout={tier_timeout:.0f}s)")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *full_cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=tier_timeout
+                )
+                if proc.returncode == 0:
+                    log_ok(cmd, 0, stdout.decode(errors="replace").strip()[:200])
+                    return SudoResult(
+                        returncode=0,
+                        output=stdout.decode(errors="replace").strip(),
+                        password_sent=False,
+                    )
+
+                # Check if it failed because of password requirement
+                err_text = stderr.decode(errors="replace")
+                needs_pw = _needs_password(err_text)
+                if not needs_pw:
+                    # Failed for another reason (command not found, etc.)
+                    combined = (stdout + stderr).decode(errors="replace").strip()
+                    log_err(cmd, proc.returncode or 1, combined[:200])
+                    return SudoResult(
+                        returncode=proc.returncode or 1,
+                        output=combined,
+                        password_sent=False,
+                    )
+                # Fast-fail: needs password, skip to next tier immediately
+                log_debug("INFO", "sudo tier 1: needs password (fast-fail), moving to tier 2")
+            except asyncio.TimeoutError:
+                log_debug("INFO", f"sudo tier 1: timed out after {tier_timeout:.0f}s")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            except Exception as exc:
+                log_debug("INFO", f"sudo tier 1 exception: {exc}")
+
+        # No password available and plain sudo didn't work
         log_err(cmd, 1, "sudo requires a password but none was provided")
         return SudoResult(
             returncode=1,
@@ -241,7 +240,7 @@ async def _sudo_exec(cmd: list[str], password: str, timeout: int = 30) -> SudoRe
     # --- Attempt 2: sudo -S (stdin pipe) ---
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        log_err(cmd, -1, "sudo cascade: no time remaining after tier 1")
+        log_err(cmd, -1, "sudo cascade: no time remaining")
         return SudoResult(returncode=-1, output="Command timed out (cascade timeout)", password_sent=False)
 
     tier_timeout = min(_TIER_TIMEOUT, remaining)
