@@ -199,7 +199,9 @@ class ActionButton(Widget):
 
     class Pressed(Message):
         """Button was pressed."""
-        pass
+        def __init__(self, action_button: "ActionButton") -> None:
+            super().__init__()
+            self.action_button = action_button
 
     DEFAULT_CSS = """
     ActionButton {
@@ -234,7 +236,7 @@ class ActionButton(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "action_btn":
-            self.post_message(self.Pressed())
+            self.post_message(self.Pressed(self))
 
     def set_loading(self, loading: bool) -> None:
         """Set loading state — disables button and updates label."""

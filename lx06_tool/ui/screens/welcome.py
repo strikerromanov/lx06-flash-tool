@@ -154,6 +154,4 @@ class WelcomeScreen(Screen):
 
     def on_action_button_pressed(self, event: ActionButton.Pressed) -> None:
         """Handle Start Setup button press."""
-        btn = event.action_button
-        if btn.id == "start_btn":
-            self.app.push_screen("environment")
+        self.app.push_screen("environment")
