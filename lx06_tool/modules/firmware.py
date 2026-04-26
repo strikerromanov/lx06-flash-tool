@@ -168,13 +168,13 @@ class FirmwareOrchestrator:
             # Use sudo to remove root-owned directories from previous extractions
             if self._paths.extract_dir.exists():
                 logger.info("Cleaning up leftover extraction directory with sudo: %s", self._paths.extract_dir)
-                result = await self._runner.run(
+                cleanup_result = await self._runner.run(
                     ["rm", "-rf", str(self._paths.extract_dir)],
                     timeout=30,
                     sudo=True,
                 )
-                if result.returncode != 0:
-                    logger.warning("Sudo cleanup failed, trying shutil.rmtree: %s", result.stderr)
+                if cleanup_result.returncode != 0:
+                    logger.warning("Sudo cleanup failed, trying shutil.rmtree: %s", cleanup_result.stderr)
                     shutil.rmtree(self._paths.extract_dir, ignore_errors=True)
 
             # Also check if parent directory has a file where extract_dir should be
