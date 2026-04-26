@@ -40,26 +40,29 @@ HANDSHAKE_DEFAULT_TIMEOUT_S: Final[int] = 120    # 2 minutes
 
 # LX06 NAND partition layout (Amlogic AXG platform).
 # mtd device → label, expected size in bytes.
+# Sizes verified against official xiaoai-patch guide:
+# https://github.com/duhow/xiaoai-patch/blob/master/research/lx06/info.md
 PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
-    "mtd0": {"label": "bootloader", "size": 0x100000},   #  1 MB
-    "mtd1": {"label": "tpl",        "size": 0x200000},   #  2 MB
-    "mtd2": {"label": "boot0",      "size": 0x800000},   #  8 MB
-    "mtd3": {"label": "boot1",      "size": 0x800000},   #  8 MB
-    "mtd4": {"label": "system0",    "size": 0x2000000},  # 32 MB — SquashFS rootfs A
-    "mtd5": {"label": "system1",    "size": 0x2000000},  # 32 MB — SquashFS rootfs B
-    "mtd6": {"label": "data",       "size": 0x800000},   #  8 MB
+    "mtd0": {"label": "bootloader", "size": 0x200000},   #  2 MB
+    "mtd1": {"label": "tpl",        "size": 0x800000},   #  8 MB
+    "mtd2": {"label": "boot0",      "size": 0x600000},   #  6 MB
+    "mtd3": {"label": "boot1",      "size": 0x600000},   #  6 MB
+    "mtd4": {"label": "system0",    "size": 0x2820000},  # 26.5 MB — SquashFS rootfs A
+    "mtd5": {"label": "system1",    "size": 0x2800000},  # 26.5 MB — SquashFS rootfs B
+    "mtd6": {"label": "data",       "size": 0x13e0000},  # 20 MB
 }
 
 # Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
-# Large squashfs partitions (~32 MB) take 3-5 minutes each over USB bulk.
+# Large squashfs partitions (~26.5 MB) and data partition (20 MB) take
+# 3-5 minutes each over USB bulk.
 PARTITION_TIMEOUTS: Final[dict[str, int]] = {
-    "bootloader": 120,   # 2 min — small (1 MB)
-    "tpl":        60,    # 1 min — small (2 MB)
-    "boot0":      120,   # 2 min — medium (8 MB)
-    "boot1":      120,   # 2 min — medium (8 MB)
-    "system0":    600,   # 10 min — large squashfs (32 MB)
-    "system1":    600,   # 10 min — large squashfs (32 MB)
-    "data":       600,   # 10 min — data partition (8 MB, may be slow)
+    "bootloader": 120,   # 2 min — small (2 MB)
+    "tpl":        180,   # 3 min — medium (8 MB)
+    "boot0":      120,   # 2 min — medium (6 MB)
+    "boot1":      120,   # 2 min — medium (6 MB)
+    "system0":    540,   # 9 min — large squashfs (26.5 MB)
+    "system1":    540,   # 9 min — large squashfs (26.5 MB)
+    "data":       600,   # 10 min — data partition (20 MB, may be slow)
 }
 DEFAULT_PARTITION_TIMEOUT: Final[int] = 300  # 5 min fallback
 
