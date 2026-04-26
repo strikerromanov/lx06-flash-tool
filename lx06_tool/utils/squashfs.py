@@ -103,12 +103,25 @@ class SquashFSTool:
 
         logger.info("Extracting squashfs: %s → %s", image_path.name, output_dir)
 
+        # Try extraction without sudo first to avoid root ownership issues
+        # This allows subsequent file operations to work without permission errors
         result = await self._runner.run(
             ["unsquashfs", "-d", str(output_dir), str(image_path)],
             timeout=120,
             on_output=on_output,
-            sudo=True,  # squashfs may need root for device nodes and permissions
+            sudo=False,  # Try without sudo to preserve user ownership
         )
+
+        # If extraction failed without sudo, retry with sudo
+        # (Some images might need sudo for device nodes)
+        if not result.success:
+            logger.info("Extraction without sudo failed, retrying with sudo...")
+            result = await self._runner.run(
+                ["unsquashfs", "-d", str(output_dir), str(image_path)],
+                timeout=120,
+                on_output=on_output,
+                sudo=True,  # Retry with sudo for device nodes
+            )
 
         if not result.success:
             raise SquashFSExtractError(
