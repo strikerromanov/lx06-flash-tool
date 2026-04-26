@@ -25,12 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional
 
-from lx06_tool.utils.debug_log import log_debug, log_cmd, log_ok, log_err
+from lx06_tool.utils.debug_log import log_cmd, log_debug, log_err, log_ok
 
 # Per-tier timeout: if a method doesn't succeed in 10s, it won't at all
 _TIER_TIMEOUT = 10
@@ -356,8 +354,8 @@ def _pty_sync(full_cmd: list[str], password: str, timeout: int) -> SudoResult:
     """
     import pty
     import select
-    import time
     import signal
+    import time
 
     pid, master_fd = pty.fork()
 
@@ -365,7 +363,7 @@ def _pty_sync(full_cmd: list[str], password: str, timeout: int) -> SudoResult:
         # --- Child process ---
         try:
             os.execvp(full_cmd[0], full_cmd)
-        except Exception as e:
+        except Exception:
             os._exit(127)
 
     # --- Parent process ---

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import datetime
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from lx06_tool.config import BackupSet, PartitionBackup
 from lx06_tool.constants import (
@@ -43,7 +43,7 @@ async def dump_partition(
     mtd_name: str,
     output_path: Path,
     *,
-    on_progress: Optional[Callable[[str], None]] = None,
+    on_progress: Callable[[str], None] | None = None,
     sudo_password: str = "",
 ) -> PartitionBackup:
     """
@@ -105,10 +105,10 @@ async def dump_all_partitions(
     tool: AmlogicTool,
     backup_dir: Path,
     *,
-    on_partition_start: Optional[Callable[[str, str], None]] = None,
-    on_partition_done:  Optional[Callable[[PartitionBackup], None]] = None,
-    on_line:            Optional[Callable[[str], None]] = None,
-    on_partition_skip:  Optional[Callable[[str, str], None]] = None,
+    on_partition_start: Callable[[str, str], None] | None = None,
+    on_partition_done:  Callable[[PartitionBackup], None] | None = None,
+    on_line:            Callable[[str], None] | None = None,
+    on_partition_skip:  Callable[[str, str], None] | None = None,
     sudo_password: str = "",
 ) -> BackupSet:
     """
@@ -166,7 +166,7 @@ async def dump_all_partitions(
 async def compute_checksums(
     backup_set: BackupSet,
     *,
-    on_partition: Optional[Callable[[str, FileChecksums], None]] = None,
+    on_partition: Callable[[str, FileChecksums], None] | None = None,
 ) -> None:
     """
     Compute SHA-256 + MD5 for every partition in `backup_set`.

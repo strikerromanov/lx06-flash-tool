@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import subprocess
-from textual.screen import Screen
-from textual.widgets import Button, RichLog
+
+from textual.widgets import RichLog
 
 
 class CopyLogMixin:

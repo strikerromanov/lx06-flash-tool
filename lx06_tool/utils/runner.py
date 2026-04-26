@@ -14,12 +14,11 @@ through this module so that:
 from __future__ import annotations
 
 import asyncio
-import signal
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Callable, Optional, Union
 
-from lx06_tool.utils.debug_log import log_cmd, log_ok, log_err
+from lx06_tool.utils.debug_log import log_cmd, log_err, log_ok
 
 # ─── Result Type ──────────────────────────────────────────────────────────────
 
@@ -56,10 +55,10 @@ class RunResult:
 async def run(
     cmd: list[str | Path],
     *,
-    cwd: Optional[Path] = None,
-    env: Optional[dict[str, str]] = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     timeout: int = 60,
-    stdin_data: Optional[str] = None,
+    stdin_data: str | None = None,
     capture: bool = True,
 ) -> RunResult:
     """
@@ -125,11 +124,11 @@ async def run(
 async def run_streaming(
     cmd: list[str | Path],
     *,
-    cwd: Optional[Path] = None,
-    env: Optional[dict[str, str]] = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     timeout: int = 300,
-    on_stdout: Optional[Callable[[str], None]] = None,
-    on_stderr: Optional[Callable[[str], None]] = None,
+    on_stdout: Callable[[str], None] | None = None,
+    on_stderr: Callable[[str], None] | None = None,
 ) -> RunResult:
     """
     Run a command and stream output line-by-line to callbacks.
@@ -158,7 +157,7 @@ async def run_streaming(
     stderr_lines: list[str] = []
 
     async def _read(stream: asyncio.StreamReader, lines: list[str],
-                    callback: Optional[Callable[[str], None]]) -> None:
+                    callback: Callable[[str], None] | None) -> None:
         async for raw_line in stream:
             line = raw_line.decode(errors="replace").rstrip("\n")
             lines.append(line)
@@ -216,7 +215,7 @@ def _terminate(proc: asyncio.subprocess.Process) -> None:
     asyncio.create_task(_kill())
 
 
-async def which_async(binary: str) -> Optional[str]:
+async def which_async(binary: str) -> str | None:
     """Async shutil.which — returns path string or None."""
     result = await run(["which", binary], timeout=5)
     return result.stdout.strip() or None

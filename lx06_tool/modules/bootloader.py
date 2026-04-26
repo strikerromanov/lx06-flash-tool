@@ -15,14 +15,12 @@ recover from a bad flash. This must be done BEFORE any partition writes.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
 
 from lx06_tool.constants import BOOTLOADER_BOOTDELAY
 from lx06_tool.exceptions import (
     AmlogicToolError,
-    BackupError,
 )
 from lx06_tool.utils.amlogic import AmlogicTool
 from lx06_tool.utils.compat import AsyncRunner

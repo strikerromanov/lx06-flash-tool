@@ -9,7 +9,6 @@ We deliberately use `HostEnvironmentError` here to avoid shadowing it.
 
 from __future__ import annotations
 
-
 # ─── Base ────────────────────────────────────────────────────────────────────
 
 class LX06Error(Exception):

@@ -199,23 +199,23 @@ class USBConnectScreen(CopyLogMixin, Screen):
         # ── All USB devices listing ────────────────────────────────────────
         all_lsusb = diag.get('all_usb_devices_lsusb', '')
         if all_lsusb:
-            log.write(f"\n[bold]All USB Devices (lsusb):[/]")
+            log.write("\n[bold]All USB Devices (lsusb):[/]")
             for line in all_lsusb.splitlines():
                 log.write(f"  [dim]{line}[/]")
 
         # Check for any devices with Amlogic VID
         aml_devices = diag.get('amlogic_vid_devices', '')
         if aml_devices:
-            log.write(f"\n[bold green]Amlogic VID (1b8e) devices found:[/]")
+            log.write("\n[bold green]Amlogic VID (1b8e) devices found:[/]")
             for line in aml_devices.splitlines():
                 log.write(f"  [green]{line}[/]")
         elif all_lsusb:
-            log.write(f"  [dim]No devices with VID 1b8e found.[/]")
+            log.write("  [dim]No devices with VID 1b8e found.[/]")
 
         # sysfs device listing for additional debug
         sysfs_devs = diag.get('all_usb_devices_sysfs', [])
         if sysfs_devs:
-            log.write(f"\n[bold]USB Devices (sysfs):[/]")
+            log.write("\n[bold]USB Devices (sysfs):[/]")
             for dev in sysfs_devs:
                 vid = dev.get('idVendor', '?')
                 pid = dev.get('idProduct', '?')
@@ -225,7 +225,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
 
         # ── Binary architecture and library details ────────────────────────
         if diag.get('update_exe_ldd'):
-            log.write(f"\n[bold]Binary Dependencies (ldd):[/]")
+            log.write("\n[bold]Binary Dependencies (ldd):[/]")
             ldd_output = diag['update_exe_ldd']
             for line in ldd_output.splitlines():
                 if 'not found' in line:
@@ -235,18 +235,18 @@ class USBConnectScreen(CopyLogMixin, Screen):
 
         # ── Binary test output ────────────────────────────────────────────
         if diag['update_exe_test_output']:
-            log.write(f"\n[bold]Binary Test:[/]")
+            log.write("\n[bold]Binary Test:[/]")
             log.write(f"  [dim]{diag['update_exe_test_output']}[/]")
 
         # ── update identify output ─────────────────────────────────────────
         identify_output = diag.get('update_identify_output', '')
         if identify_output:
-            log.write(f"\n[bold]update identify test:[/]")
+            log.write("\n[bold]update identify test:[/]")
             log.write(f"  [dim]{identify_output}[/]")
 
         # ── Old rules warning with contents and cleanup results ────────────
         if diag['old_rules_found']:
-            log.write(f"\n[yellow]\u26a0 Old conflicting udev rules found:[/]")
+            log.write("\n[yellow]\u26a0 Old conflicting udev rules found:[/]")
             for rule in diag['old_rules_found']:
                 content = diag.get('old_rules_contents', {}).get(rule, '')
                 log.write(f"  [yellow]\u274c {rule}[/]")
@@ -257,7 +257,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
             # Show cleanup results
             cleanup_results = diag.get('old_rules_cleanup_results', [])
             if cleanup_results:
-                log.write(f"\n  [bold]Cleanup results:[/]")
+                log.write("\n  [bold]Cleanup results:[/]")
                 for cr in cleanup_results:
                     status = cr.get('status', '?')
                     path = cr.get('path', '?')
@@ -276,14 +276,14 @@ class USBConnectScreen(CopyLogMixin, Screen):
                 ]
                 if remaining:
                     log.write(
-                        f"  [red]\u26a0 These rules still exist and may need manual removal.[/]"
+                        "  [red]\u26a0 These rules still exist and may need manual removal.[/]"
                     )
                 else:
-                    log.write(f"  [green]All old rules cleaned up successfully.[/]")
+                    log.write("  [green]All old rules cleaned up successfully.[/]")
 
         # ── udev rules content ────────────────────────────────────────────
         if diag['udev_rules_content']:
-            log.write(f"\n[bold]Current udev rule:[/]")
+            log.write("\n[bold]Current udev rule:[/]")
             for line in diag['udev_rules_content'].splitlines():
                 log.write(f"  [dim]{line}[/]")
 
@@ -296,7 +296,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
         # ── Actionable advice ─────────────────────────────────────────────
         advice = diag.get('advice', [])
         if advice:
-            log.write(f"\n[bold cyan]\U0001f4a1 Suggested fixes:[/]")
+            log.write("\n[bold cyan]\U0001f4a1 Suggested fixes:[/]")
             for tip in advice:
                 log.write(f"  [cyan]• {tip}")
 
@@ -451,7 +451,7 @@ class USBConnectScreen(CopyLogMixin, Screen):
         except Exception as exc:
             exc_str = str(exc).lower()
             if "not identified" in exc_str or "timeout" in exc_str:
-                log.write(f"\n[yellow]\u26a0 Device not detected within 120s timeout.[/]")
+                log.write("\n[yellow]\u26a0 Device not detected within 120s timeout.[/]")
                 log.write("[dim]Power-cycle the speaker and try again.[/]")
                 log.write("[dim]Make sure you hold the test-pad short while plugging in USB.[/]")
             else:

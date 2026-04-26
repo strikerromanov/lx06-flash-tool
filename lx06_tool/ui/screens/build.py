@@ -128,8 +128,8 @@ class BuildScreen(Screen):
             Tuple of (system_image_path, boot_image_path or None).
         """
         from lx06_tool.modules.firmware import (
-            extract_partition_from_device,
             extract_active_system_from_device,
+            extract_partition_from_device,
         )
 
         tool = app.get_aml_tool()
@@ -241,7 +241,7 @@ class BuildScreen(Screen):
                         system_image, boot_image = await self._extract_from_device(
                             app, log, build_dir, sudo_password=pw,
                         )
-                        source_label = f"device (direct extraction)"
+                        source_label = "device (direct extraction)"
                     except Exception as exc:
                         log.write("")
                         log.write("[bold red]✗ Direct extraction failed![/]")
@@ -284,7 +284,7 @@ class BuildScreen(Screen):
                         )
                     except ValueError as exc:
                         log.write("")
-                        log.write(f"[bold red]\u2717 Path validation failed:[/]")
+                        log.write("[bold red]\u2717 Path validation failed:[/]")
                         log.write(f"  {exc}")
                         self.query_one("#start-btn", Button).disabled = False
                         return
@@ -292,10 +292,10 @@ class BuildScreen(Screen):
                     with open(safe_path, 'rb') as f:
                         header = f.read(16)
                     log.write("")
-                    log.write(f"[bold red]\u2717 System image is NOT a valid squashfs![/]")
+                    log.write("[bold red]\u2717 System image is NOT a valid squashfs![/]")
                     log.write(f"  File: {system_image.name} ({system_image.stat().st_size:,} bytes)")
                     log.write(f"  First bytes: {header.hex()}")
-                    log.write(f"  Expected: 68737173 (hsqs)")
+                    log.write("  Expected: 68737173 (hsqs)")
                     log.write("")
                     log.write("[yellow]Possible causes:[/]")
                     log.write("  \u2022 Wrong partition size used during dump")
@@ -309,7 +309,7 @@ class BuildScreen(Screen):
                     log.write("  3. Try querying actual partition sizes from device")
                     self.query_one("#start-btn", Button).disabled = False
                     return
-                log.write(f"  [green]\u2713[/] System image validated (valid squashfs)")
+                log.write("  [green]\u2713[/] System image validated (valid squashfs)")
 
 
             # ── Step 2: Create pipeline with correct paths ───────────────
@@ -333,7 +333,7 @@ class BuildScreen(Screen):
                 return
 
             on_step("Firmware build complete!", 100)
-            log.write(f"\n[bold green]Custom firmware built successfully![/]")
+            log.write("\n[bold green]Custom firmware built successfully![/]")
             if result.output_system:
                 log.write(f"  Output: {result.output_system}")
                 log.write(f"  Size: {result.output_system.stat().st_size:,} bytes")

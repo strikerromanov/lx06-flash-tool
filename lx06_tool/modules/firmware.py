@@ -17,22 +17,21 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from lx06_tool.config import CustomizationChoices
-from lx06_tool.constants import PARTITION_MAP
 from lx06_tool.exceptions import (
     FirmwareError,
     SquashFSError,
 )
-from lx06_tool.modules.debloat import DebloatEngine
-from lx06_tool.modules.media_suite import MediaSuiteInstaller
 from lx06_tool.modules.ai_brain import AIBrainInstaller
+from lx06_tool.modules.debloat import DebloatEngine
 from lx06_tool.modules.docker_builder import DockerBuilder
-from lx06_tool.utils.squashfs import SquashFSTool
+from lx06_tool.modules.media_suite import MediaSuiteInstaller
 from lx06_tool.utils.compat import AsyncRunner
+from lx06_tool.utils.squashfs import SquashFSTool
 
 logger = logging.getLogger(__name__)
 
@@ -336,11 +335,11 @@ class FirmwareOrchestrator:
 
 
 async def extract_partition_from_device(
-    tool: "AmlogicTool",
+    tool: AmlogicTool,
     partition_label: str,
     output_path: Path,
     *,
-    on_progress: "Callable[[str], None] | None" = None,
+    on_progress: Callable[[str], None] | None = None,
     sudo_password: str = "",
 ) -> Path:
     """Extract a partition directly from a connected device.
@@ -362,7 +361,6 @@ async def extract_partition_from_device(
     Raises:
         FirmwareError: If extraction fails.
     """
-    from lx06_tool.utils.amlogic import AmlogicTool  # noqa: F811
     from lx06_tool.exceptions import UpdateExeError
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,10 +433,10 @@ async def extract_partition_from_device(
 
 
 async def extract_active_system_from_device(
-    tool: "AmlogicTool",
+    tool: AmlogicTool,
     output_dir: Path,
     *,
-    on_progress: "Callable[[str], None] | None" = None,
+    on_progress: Callable[[str], None] | None = None,
     sudo_password: str = "",
 ) -> tuple[Path, str]:
     """Extract the active system partition from a connected device.
@@ -456,7 +454,6 @@ async def extract_active_system_from_device(
         Tuple of (system_image_path, active_slot_label).
         e.g. (Path(".../mtd4_system0.img"), "system0")
     """
-    from lx06_tool.constants import PARTITION_MAP
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

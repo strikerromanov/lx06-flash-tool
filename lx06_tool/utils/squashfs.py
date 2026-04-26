@@ -11,8 +11,8 @@ for permission isolation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from lx06_tool.constants import (
     SQUASHFS_BLOCK_SIZE,
@@ -21,9 +21,9 @@ from lx06_tool.constants import (
     SQUASHFS_XATTRS,
 )
 from lx06_tool.exceptions import (
+    InvalidFirmwareError,
     SquashFSExtractError,
     SquashFSRepackError,
-    InvalidFirmwareError,
 )
 from lx06_tool.utils.compat import AsyncRunner
 
@@ -255,5 +255,5 @@ class SquashFSTool:
             with open(path, 'rb') as f:
                 magic = f.read(4)
             return magic in (b'hsqs', b'sqsh')
-        except (OSError, IOError):
+        except OSError:
             return False

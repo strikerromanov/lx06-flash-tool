@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
-from lx06_tool.app import LX06App, FlashResult
-from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
+from lx06_tool.app import FlashResult, LX06App
 from lx06_tool.modules.flasher import (
     detect_active_partition,
     flash_all,
 )
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 
 logger = logging.getLogger(__name__)
 

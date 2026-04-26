@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Callable
-
 
 _CHUNK = 1024 * 1024  # 1 MB read chunks
 
@@ -27,7 +26,7 @@ class FileChecksums:
 async def hash_file(
     path: Path,
     *,
-    on_progress: Optional[Callable[[int, int], None]] = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> FileChecksums:
     """
     Compute SHA-256 and MD5 of a file asynchronously (runs in executor
@@ -43,7 +42,7 @@ async def hash_file(
 
 def _hash_sync(
     path: Path,
-    on_progress: Optional[Callable[[int, int], None]],
+    on_progress: Callable[[int, int], None] | None,
 ) -> FileChecksums:
     sha256 = hashlib.sha256()
     md5    = hashlib.md5()
@@ -70,7 +69,7 @@ async def verify_file(
     path: Path,
     expected_sha256: str,
     *,
-    expected_md5: Optional[str] = None,
+    expected_md5: str | None = None,
 ) -> bool:
     """
     Hash a file and compare against expected checksums.

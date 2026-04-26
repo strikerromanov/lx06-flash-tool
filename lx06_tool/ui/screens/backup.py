@@ -11,13 +11,14 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Markdown, ProgressBar, RichLog, Static
 
 from lx06_tool.app import LX06App
-from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
 from lx06_tool.modules.backup import (
-    dump_all_partitions,
     compute_checksums,
-    verify_backup,
+    dump_all_partitions,
     generate_backup_report,
+    verify_backup,
 )
+from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
+
 logger = logging.getLogger(__name__)
 
 BACKUP_INFO = """## Phase 2: Backup & Safety

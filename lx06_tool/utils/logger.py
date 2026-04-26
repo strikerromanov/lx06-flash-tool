@@ -12,10 +12,14 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
 
-from lx06_tool.constants import DEFAULT_LOG_DIR, LOG_FORMAT, LOG_DATE_FORMAT, LOG_MAX_FILES, LOG_MAX_SIZE_MB
-
+from lx06_tool.constants import (
+    DEFAULT_LOG_DIR,
+    LOG_DATE_FORMAT,
+    LOG_FORMAT,
+    LOG_MAX_FILES,
+    LOG_MAX_SIZE_MB,
+)
 
 # Track whether logging has been initialized to avoid duplicate handlers
 _initialized = False

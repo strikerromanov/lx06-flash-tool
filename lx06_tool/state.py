@@ -11,7 +11,6 @@ to the last registered safe state.
 from __future__ import annotations
 
 from enum import Enum, auto
-from typing import Optional
 
 from lx06_tool.exceptions import StateTransitionError
 
@@ -103,7 +102,7 @@ class StateMachine:
 
     def __init__(self) -> None:
         self._state: AppState = AppState.WELCOME
-        self._error_origin: Optional[AppState] = None   # State where error occurred
+        self._error_origin: AppState | None = None   # State where error occurred
         self._last_safe: AppState = AppState.WELCOME
 
     @property
@@ -134,7 +133,7 @@ class StateMachine:
 
         self._state = target
 
-    def to_error(self, origin: Optional[AppState] = None) -> None:
+    def to_error(self, origin: AppState | None = None) -> None:
         """Transition to ERROR, recording where the failure occurred."""
         self._error_origin = origin or self._state
         self._state = AppState.ERROR
@@ -157,11 +156,11 @@ class StateMachine:
         return target in _TRANSITIONS.get(self._state, [])
 
     @property
-    def error_origin(self) -> Optional[AppState]:
+    def error_origin(self) -> AppState | None:
         return self._error_origin
 
     @property
-    def recovery_target(self) -> Optional[AppState]:
+    def recovery_target(self) -> AppState | None:
         if self._error_origin:
             return _RECOVERY_POINTS.get(self._error_origin)
         return None

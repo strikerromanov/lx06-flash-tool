@@ -14,13 +14,10 @@ from textual.widgets import Button, Input, Markdown, RichLog, Static
 
 from lx06_tool.app import LX06App
 from lx06_tool.modules.environment import (
-    OSInfo,
-    DependencyStatus,
-    detect_os,
     check_dependencies,
+    detect_os,
     install_dependencies,
     verify_docker,
-    install_udev_rules,
 )
 from lx06_tool.ui.widgets.copy_log import CopyLogMixin
 from lx06_tool.utils.debug_log import RichLogSink, register_sink, unregister_sink
@@ -275,8 +272,8 @@ class EnvironmentScreen(CopyLogMixin, Screen):
         log.write("\n[bold blue]Downloading aml-flash-tool...[/]")
 
         try:
-            from lx06_tool.utils.downloader import AsyncDownloader
             from lx06_tool.constants import AML_FLASH_TOOL_REPO, UPDATE_EXE_RELPATH
+            from lx06_tool.utils.downloader import AsyncDownloader
 
             tools_dir = Path(app.config.tools_dir)
             tools_dir.mkdir(parents=True, exist_ok=True)

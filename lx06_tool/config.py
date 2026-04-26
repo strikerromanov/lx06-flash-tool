@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from platformdirs import user_cache_path, user_config_path, user_data_path
@@ -90,7 +89,7 @@ class PartitionBackup:
     """Tracks a single dumped partition."""
     name: str                        # "mtd0", "mtd4", …
     label: str                       # "bootloader", "system0", …
-    path: Optional[Path] = None
+    path: Path | None = None
     size_bytes: int = 0
     expected_size: int = 0
     sha256: str = ""
@@ -110,7 +109,7 @@ class BackupSet:
     """Complete set of partition backups for one session."""
     partitions: dict[str, PartitionBackup] = field(default_factory=dict)
     timestamp: str = ""            # ISO-8601 timestamp of backup run
-    backup_dir: Optional[Path] = None
+    backup_dir: Path | None = None
     all_verified: bool = False
 
     @property
@@ -189,7 +188,7 @@ class AppConfig:
     tools_dir: Path = field(default_factory=default_tools_dir)
 
     # Resolved path to the `update` binary (aml-flash-tool)
-    update_exe_path: Optional[Path] = None
+    update_exe_path: Path | None = None
 
     # ── Docker
     use_docker_build: bool = True
@@ -234,14 +233,14 @@ class AppConfig:
             },
         }
 
-    def save(self, path: Optional[Path] = None) -> None:
+    def save(self, path: Path | None = None) -> None:
         config_path = path or default_config_path()
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(self.to_dict(), fh, default_flow_style=False)
 
     @classmethod
-    def load(cls, path: Optional[Path] = None) -> "AppConfig":
+    def load(cls, path: Path | None = None) -> AppConfig:
         config_path = path or default_config_path()
         if not config_path.exists():
             return cls()

@@ -16,14 +16,14 @@ Using Docker for firmware builds isolates the host system from:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
-from lx06_tool.constants import FIRMWARE_BUILDER_IMAGE, DOCKERFILE_PATH
+from lx06_tool.constants import DOCKERFILE_PATH, FIRMWARE_BUILDER_IMAGE
 from lx06_tool.exceptions import DockerBuildError
-from lx06_tool.utils.docker_utils import DockerUtils
 from lx06_tool.utils.compat import AsyncRunner
+from lx06_tool.utils.docker_utils import DockerUtils
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class DockerBuilder:
 
         if not build_result.success:
             raise DockerBuildError(
-                f"SquashFS repack failed in Docker container",
+                "SquashFS repack failed in Docker container",
                 details=build_result.logs[:500],
             )
 

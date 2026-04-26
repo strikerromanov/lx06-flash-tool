@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +170,7 @@ def validate_string_input(
     *,
     max_length: int = 1000,
     allow_empty: bool = False,
-    allowed_chars: Optional[str] = None,
+    allowed_chars: str | None = None,
 ) -> str:
     """Validate string input.
 
@@ -211,8 +210,8 @@ def validate_string_input(
 def validate_int_input(
     value: str,
     *,
-    min_value: Optional[int] = None,
-    max_value: Optional[int] = None,
+    min_value: int | None = None,
+    max_value: int | None = None,
 ) -> int:
     """Validate and convert integer input.
 
@@ -251,7 +250,7 @@ class SecurityContext:
         *,
         base_dir: Path,
         max_file_size: int = 1024 * 1024 * 1024,  # 1 GB default
-        allowed_commands: Optional[set[str]] = None,
+        allowed_commands: set[str] | None = None,
         strict_mode: bool = True,
     ):
         """Initialize security context.

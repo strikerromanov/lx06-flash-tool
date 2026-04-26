@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Center, Vertical, VerticalScroll
+from textual.containers import Center, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, Static
+from textual.widgets import Button, Markdown
 
-from lx06_tool.app import LX06App, FlashResult
+from lx06_tool.app import FlashResult, LX06App
 
 
 class CompleteScreen(Screen):

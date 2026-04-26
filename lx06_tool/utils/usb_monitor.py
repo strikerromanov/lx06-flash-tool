@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from lx06_tool.utils.amlogic import AmlogicTool
 
@@ -26,7 +26,7 @@ class USBMonitor:
         tool: AmlogicTool,
         *,
         keep_alive_interval: float = 30.0,  # seconds
-        on_disconnect: Optional[Callable] = None,
+        on_disconnect: Callable | None = None,
     ):
         """Initialize USB monitor.
 
@@ -39,7 +39,7 @@ class USBMonitor:
         self._keep_alive_interval = keep_alive_interval
         self._on_disconnect = on_disconnect
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._last_check_time = 0
 
     async def start(self) -> None:
@@ -123,7 +123,7 @@ class USBSafetyGuard:
         tool: AmlogicTool,
         *,
         keep_alive_interval: float = 30.0,
-        on_disconnect: Optional[Callable] = None,
+        on_disconnect: Callable | None = None,
     ):
         """Initialize safety guard.
 

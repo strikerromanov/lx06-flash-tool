@@ -15,21 +15,18 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.widgets import (
     Footer,
     Header,
-    Label,
     ProgressBar,
     Static,
 )
@@ -43,6 +40,7 @@ from lx06_tool.state import StateMachine
 from lx06_tool.ui.widgets.debug_log import DebugLogPanel
 from lx06_tool.utils.amlogic import AmlogicTool
 from lx06_tool.utils.sudo import SudoContext
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,14 +189,14 @@ class LX06App(App):
         if self._screens_loaded:
             return
 
-        from lx06_tool.ui.screens.welcome import WelcomeScreen
-        from lx06_tool.ui.screens.environment import EnvironmentScreen
-        from lx06_tool.ui.screens.usb_connect import USBConnectScreen
         from lx06_tool.ui.screens.backup import BackupScreen
-        from lx06_tool.ui.screens.customize import CustomizeScreen
         from lx06_tool.ui.screens.build import BuildScreen
-        from lx06_tool.ui.screens.flash import FlashScreen
         from lx06_tool.ui.screens.complete import CompleteScreen
+        from lx06_tool.ui.screens.customize import CustomizeScreen
+        from lx06_tool.ui.screens.environment import EnvironmentScreen
+        from lx06_tool.ui.screens.flash import FlashScreen
+        from lx06_tool.ui.screens.usb_connect import USBConnectScreen
+        from lx06_tool.ui.screens.welcome import WelcomeScreen
 
         screen_map = {
             "welcome": WelcomeScreen,
@@ -525,9 +523,10 @@ def main() -> None:
     if args.check:
         # Non-interactive environment check using new standalone functions
         import asyncio as _aio
+
         from lx06_tool.modules.environment import (
-            detect_os,
             check_dependencies,
+            detect_os,
             verify_docker,
         )
 
@@ -543,7 +542,7 @@ def main() -> None:
 
                 print(f"\nDependencies checked: {len(deps)}")
                 if missing:
-                    print(f"Missing packages:")
+                    print("Missing packages:")
                     for d in missing:
                         print(f"  - {d.package_name} ({d.logical_name})")
                 else:

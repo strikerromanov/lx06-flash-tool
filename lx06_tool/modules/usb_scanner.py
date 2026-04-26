@@ -19,14 +19,16 @@ strategy to reliably catch this narrow window:
 """
 
 from __future__ import annotations
+
 import asyncio
 import glob
 import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from lx06_tool.constants import (
     AMLOGIC_USB_PRODUCT_ID,
@@ -37,9 +39,9 @@ from lx06_tool.constants import (
     OLD_UDEV_RULES,
     UDEV_GLOB_DIRS,
     UDEV_GLOB_PATTERNS,
-    UPDATE_EXE_RELPATH,
     UDEV_RULE_LINE,
     UDEV_RULES_DEST,
+    UPDATE_EXE_RELPATH,
 )
 from lx06_tool.exceptions import (
     DeviceDisconnectedError,
@@ -537,6 +539,7 @@ async def test_usb_detection(
     # Check XDG data dir location
     try:
         from platformdirs import user_data_path
+
         from lx06_tool.constants import APP_NAME, TOOLS_SUBDIR
         xdg_tools = user_data_path(APP_NAME) / TOOLS_SUBDIR
         exe_candidates.append(xdg_tools / "aml-flash-tool" / UPDATE_EXE_RELPATH)
@@ -820,8 +823,8 @@ async def handshake_loop(
     fast_poll: float = FAST_POLL_INTERVAL_S,
     identify_poll: float = HANDSHAKE_POLL_INTERVAL_S,
     sudo_password: str = "",
-    on_attempt: Optional[Callable[[int, int, str], None]] = None,
-    on_phase: Optional[Callable[[str], None]] = None,
+    on_attempt: Callable[[int, int, str], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> AmlogicDeviceInfo:
     """
     Two-phase USB handshake for the Amlogic burning mode.

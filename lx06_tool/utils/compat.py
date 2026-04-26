@@ -9,7 +9,7 @@ wrapper so those modules continue to work without rewriting every call site.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from lx06_tool.utils.runner import RunResult, run, run_streaming
 
@@ -62,10 +62,10 @@ class AsyncRunner:
         self,
         cmd: list[str],
         *,
-        timeout: Optional[float] = None,
-        on_output: Optional[Callable[[str, str], None]] = None,
-        sudo: Optional[bool] = None,
-        sudo_password: Optional[str] = None,
+        timeout: float | None = None,
+        on_output: Callable[[str, str], None] | None = None,
+        sudo: bool | None = None,
+        sudo_password: str | None = None,
         check: bool = False,
     ) -> CommandResult:
         """Execute *cmd* and return a CommandResult."""
@@ -77,7 +77,7 @@ class AsyncRunner:
         effective_timeout = int(timeout or self._default_timeout)
 
         # Build stdin_data when sudo -S is needed
-        stdin_data: Optional[str] = None
+        stdin_data: str | None = None
         if use_sudo and pw:
             actual_cmd = ["sudo", "-S"] + str_cmd
             stdin_data = pw + "\n"

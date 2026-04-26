@@ -14,13 +14,11 @@ Features:
 from __future__ import annotations
 
 import subprocess
-from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.css.query import NoMatches
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Button, RichLog, Static

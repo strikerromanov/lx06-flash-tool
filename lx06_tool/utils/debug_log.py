@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from typing import Optional, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 

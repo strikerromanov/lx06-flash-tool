@@ -36,7 +36,6 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from lx06_tool.constants import (
     DEFAULT_PARTITION_TIMEOUT,
@@ -46,7 +45,6 @@ from lx06_tool.constants import (
 )
 from lx06_tool.exceptions import UpdateExeError
 from lx06_tool.utils.runner import RunResult, run, run_streaming
-
 
 # ─── Device Info ──────────────────────────────────────────────────────────────
 
@@ -383,7 +381,7 @@ class AmlogicTool:
         *,
         size: int = 0,
         timeout: int = 0,
-        on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        on_progress: callable | None = None,    # type: ignore[type-arg]
         sudo_password: str = "",
     ) -> Path:
         """
@@ -515,7 +513,7 @@ class AmlogicTool:
         self,
         cmd: list[str],
         timeout: int,
-        on_progress: Optional[callable],    # type: ignore[type-arg]
+        on_progress: callable | None,    # type: ignore[type-arg]
         sudo_password: str,
     ) -> RunResult:
         """Execute a dump command with sudo fallback."""
@@ -563,7 +561,7 @@ class AmlogicTool:
         output_path: Path,
         *,
         timeout: int = 600,
-        on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        on_progress: callable | None = None,    # type: ignore[type-arg]
         sudo_password: str = "",
     ) -> None:
         """Fallback chunked dump using RAM transfer.
@@ -702,7 +700,7 @@ class AmlogicTool:
         *,
         size: int = 0,
         timeout: int = 0,
-        on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        on_progress: callable | None = None,    # type: ignore[type-arg]
         sudo_password: str = "",
     ) -> Path:
         """
@@ -1026,7 +1024,7 @@ class AmlogicTool:
         *,
         partition_type: str = "normal",
         timeout: int = 300,
-        on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        on_progress: callable | None = None,    # type: ignore[type-arg]
         sudo_password: str = "",
     ) -> RunResult:
         """
@@ -1096,7 +1094,7 @@ class AmlogicTool:
         image_path: Path,
         *,
         timeout: int = 300,
-        on_progress: Optional[callable] = None,    # type: ignore[type-arg]
+        on_progress: callable | None = None,    # type: ignore[type-arg]
         sudo_password: str = "",
     ) -> RunResult:
         """

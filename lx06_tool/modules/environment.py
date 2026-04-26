@@ -15,7 +15,6 @@ CachyOS notes
 
 from __future__ import annotations
 
-import asyncio
 import os
 import platform
 import shutil
@@ -23,18 +22,15 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from lx06_tool.constants import DISTRO_PACKAGES, OS_FAMILY_MAP, OS_LIKE_MAP
 from lx06_tool.exceptions import (
     DependencyInstallError,
-    DependencyMissingError,
     DockerNotRunningError,
     HostEnvironmentError,
     UnsupportedDistroError,
 )
-from lx06_tool.utils.runner import RunResult, run
-
+from lx06_tool.utils.runner import run
 
 # ─── Data Classes ─────────────────────────────────────────────────────────────
 
@@ -47,7 +43,7 @@ class OSInfo:
     version: str        # VERSION_ID (may be empty on rolling distros)
     family: str         # Normalised: "arch" | "debian" | "fedora"
     pkg_manager: str    # "pacman" | "apt" | "dnf"
-    aur_helper: Optional[str] = None  # "paru" | "yay" | None (Arch only)
+    aur_helper: str | None = None  # "paru" | "yay" | None (Arch only)
 
     @property
     def is_arch_family(self) -> bool:
@@ -139,7 +135,7 @@ def _parse_os_release() -> dict[str, str]:
     return {}
 
 
-def _resolve_family(raw_id: str, raw_like: str) -> Optional[str]:
+def _resolve_family(raw_id: str, raw_like: str) -> str | None:
     # 1. Direct ID match
     if raw_id in OS_FAMILY_MAP:
         return OS_FAMILY_MAP[raw_id]
@@ -161,7 +157,7 @@ def _family_to_pm(family: str) -> str:
     return {"arch": "pacman", "debian": "apt", "fedora": "dnf"}[family]
 
 
-def _detect_aur_helper() -> Optional[str]:
+def _detect_aur_helper() -> str | None:
     """Check for paru or yay AUR helpers (Arch family only)."""
     for helper in ("paru", "yay"):
         if shutil.which(helper):

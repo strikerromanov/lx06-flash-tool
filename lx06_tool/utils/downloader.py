@@ -9,9 +9,8 @@ pre-compiled binaries from GitHub releases.
 from __future__ import annotations
 
 import logging
-import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
@@ -79,34 +78,33 @@ class AsyncDownloader:
                 follow_redirects=True,
                 proxy=proxy_url,
                 timeout=httpx.Timeout(30.0, read=300.0),
-            ) as client:
-                async with client.stream("GET", url, headers=request_headers) as response:
-                    if response.status_code not in (200, 206):
-                        raise DownloadError(
-                            f"HTTP {response.status_code} downloading {url}: {response.reason_phrase}"
-                        )
+            ) as client, client.stream("GET", url, headers=request_headers) as response:
+                if response.status_code not in (200, 206):
+                    raise DownloadError(
+                        f"HTTP {response.status_code} downloading {url}: {response.reason_phrase}"
+                    )
 
-                    total_size = int(response.headers.get("content-length", 0))
-                    if response.status_code == 206:
-                        # Partial content — total is the full file size from Content-Range
-                        content_range = response.headers.get("content-range", "")
-                        if "/" in content_range:
-                            total_size = int(content_range.split("/")[-1])
-                    elif resume_from > 0 and total_size > 0:
-                        total_size += resume_from
+                total_size = int(response.headers.get("content-length", 0))
+                if response.status_code == 206:
+                    # Partial content — total is the full file size from Content-Range
+                    content_range = response.headers.get("content-range", "")
+                    if "/" in content_range:
+                        total_size = int(content_range.split("/")[-1])
+                elif resume_from > 0 and total_size > 0:
+                    total_size += resume_from
 
-                    mode = "ab" if response.status_code == 206 else "wb"
-                    bytes_downloaded = resume_from
+                mode = "ab" if response.status_code == 206 else "wb"
+                bytes_downloaded = resume_from
 
-                    with open(output_path, mode) as f:
-                        async for chunk in response.aiter_bytes(self._chunk_size):
-                            f.write(chunk)
-                            bytes_downloaded += len(chunk)
-                            if on_progress:
-                                try:
-                                    on_progress(bytes_downloaded, total_size)
-                                except Exception:
-                                    pass
+                with open(output_path, mode) as f:
+                    async for chunk in response.aiter_bytes(self._chunk_size):
+                        f.write(chunk)
+                        bytes_downloaded += len(chunk)
+                        if on_progress:
+                            try:
+                                on_progress(bytes_downloaded, total_size)
+                            except Exception:
+                                pass
 
             logger.info(
                 "Downloaded %s (%d bytes) → %s",

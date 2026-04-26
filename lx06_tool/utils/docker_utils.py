@@ -9,8 +9,8 @@ operations from the host to avoid permission and compatibility issues.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from lx06_tool.constants import DOCKER_BUILD_IMAGE_NAME, DOCKER_BUILD_IMAGE_TAG
 from lx06_tool.exceptions import DockerBuildError, DockerImageNotFoundError

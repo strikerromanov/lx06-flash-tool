@@ -13,8 +13,8 @@ Safety Rules
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from lx06_tool.config import LX06Device
 from lx06_tool.constants import (
@@ -29,7 +29,6 @@ from lx06_tool.exceptions import (
     FlashVerificationError,
 )
 from lx06_tool.utils.amlogic import AmlogicTool
-
 
 # ─── A/B Partition Detection ─────────────────────────────────────────────────
 
@@ -101,7 +100,7 @@ async def flash_partition(
     image_path: Path,
     device: LX06Device,
     *,
-    on_progress: Optional[Callable[[str], None]] = None,
+    on_progress: Callable[[str], None] | None = None,
     min_size: int = 0,
     sudo_password: str = "",
 ) -> None:
@@ -147,11 +146,11 @@ async def flash_partition(
 async def flash_all(
     tool: AmlogicTool,
     device: LX06Device,
-    boot_image: Optional[Path],
+    boot_image: Path | None,
     system_image: Path,
     *,
-    on_step: Optional[Callable[[str], None]] = None,
-    on_line: Optional[Callable[[str], None]] = None,
+    on_step: Callable[[str], None] | None = None,
+    on_line: Callable[[str], None] | None = None,
     sudo_password: str = "",
 ) -> None:
     """

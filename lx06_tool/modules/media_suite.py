@@ -22,12 +22,11 @@ from __future__ import annotations
 import logging
 import shutil
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from lx06_tool.config import CustomizationChoices
-from lx06_tool.exceptions import FirmwareError
 from lx06_tool.utils.compat import AsyncRunner
 
 logger = logging.getLogger(__name__)

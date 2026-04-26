@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Center, Vertical, VerticalScroll
+from textual.containers import Center, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Markdown, Static
+from textual.widgets import Button, Markdown
 
 WELCOME_MARKDOWN = """
 # LX06 Flash Tool
