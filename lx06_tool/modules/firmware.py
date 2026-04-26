@@ -210,6 +210,20 @@ class FirmwareOrchestrator:
                 self._paths.system_dump,
                 self._paths.extract_dir,
             )
+
+            # Fix ownership: unsquashfs creates root-owned files
+            # Change to current user so debloat/media operations can write files
+            logger.info("Fixing ownership of extracted files...")
+            import getpass
+            current_user = getpass.getuser()
+            chown_result = await self._runner.run(
+                ["chown", "-R", f"{current_user}:{current_user}", str(self._paths.extract_dir)],
+                timeout=60,
+                sudo=True,
+            )
+            if chown_result.returncode != 0:
+                logger.warning("chown failed, some operations may need sudo: %s", chown_result.stderr)
+
             result.rootfs_size_before = self._dir_size(self._paths.rootfs_dir)
             result.steps_completed.append("extract")
             if on_output:
