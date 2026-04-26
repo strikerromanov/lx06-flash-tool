@@ -77,15 +77,27 @@ class SquashFSTool:
             raise InvalidFirmwareError(f"Firmware image not found: {image_path}")
 
         # Remove existing extraction to avoid conflicts
+        # Use sudo to handle root-owned directories from previous extractions
         import shutil
         if output_dir.exists():
-            logger.debug("Removing existing extraction directory: %s", output_dir)
-            shutil.rmtree(output_dir, ignore_errors=True)
+            logger.debug("Removing existing extraction directory with sudo: %s", output_dir)
+            result = await self._runner.run(
+                ["rm", "-rf", str(output_dir)],
+                timeout=30,
+                sudo=True,
+            )
+            # Fallback to shutil if sudo rm fails (shouldn't happen with password)
+            if result.returncode != 0:
+                shutil.rmtree(output_dir, ignore_errors=True)
 
         # Also check if there's a file at the output path (from failed extraction)
         if output_dir.is_file():
-            logger.warning("Removing file at extraction directory path: %s", output_dir)
-            output_dir.unlink()
+            logger.warning("Removing file at extraction directory path with sudo: %s", output_dir)
+            await self._runner.run(
+                ["rm", "-f", str(output_dir)],
+                timeout=10,
+                sudo=True,
+            )
 
         output_dir.parent.mkdir(parents=True, exist_ok=True)
 

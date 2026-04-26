@@ -165,17 +165,28 @@ class FirmwareOrchestrator:
 
         try:
             # Clean up any leftover state from previous failed extractions
-            # This handles cases where unsquashfs left partial directories
+            # Use sudo to remove root-owned directories from previous extractions
             if self._paths.extract_dir.exists():
-                logger.info("Cleaning up leftover extraction directory: %s", self._paths.extract_dir)
-                shutil.rmtree(self._paths.extract_dir, ignore_errors=True)
+                logger.info("Cleaning up leftover extraction directory with sudo: %s", self._paths.extract_dir)
+                result = await self._runner.run(
+                    ["rm", "-rf", str(self._paths.extract_dir)],
+                    timeout=30,
+                    sudo=True,
+                )
+                if result.returncode != 0:
+                    logger.warning("Sudo cleanup failed, trying shutil.rmtree: %s", result.stderr)
+                    shutil.rmtree(self._paths.extract_dir, ignore_errors=True)
 
             # Also check if parent directory has a file where extract_dir should be
             if self._paths.extract_dir.parent.exists():
                 for item in self._paths.extract_dir.parent.iterdir():
                     if item.name == self._paths.extract_dir.name and item.is_file():
-                        logger.warning("Removing file at extraction path: %s", item)
-                        item.unlink()
+                        logger.warning("Removing file at extraction path with sudo: %s", item)
+                        await self._runner.run(
+                            ["rm", "-f", str(item)],
+                            timeout=10,
+                            sudo=True,
+                        )
 
             self._paths.extract_dir.mkdir(parents=True, exist_ok=True)
             await self._squashfs.extract(
