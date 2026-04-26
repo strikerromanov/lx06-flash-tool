@@ -155,19 +155,18 @@ class MediaSuiteInstaller:
             if on_output:
                 on_output("stdout", f"  Installing {comp['description']}...")
 
-            # Install binaries
+            # Install binaries (non-fatal if missing)
             bins_ok = await self._install_binaries(
                 comp["binaries"], result=result, on_output=on_output,
             )
 
             if not bins_ok:
+                # Generate install script for missing binaries instead of skipping
+                self._generate_install_script(comp, rootfs_dir=self._rootfs, missing=comp["binaries"])
                 result.warnings.append(
-                    f"{comp_name}: Binaries not found in {self._binaries_dir}. "
-                    f"Component will be non-functional."
+                    f"{comp_name}: Binaries not in {self._binaries_dir}. "
+                    f"Install script created at /root/install_{comp['init_name']}.sh"
                 )
-                result.skipped.append(comp_name)
-                continue
-
             # Generate config
             if comp["config_template"]:
                 await self._generate_config(
@@ -359,6 +358,61 @@ esac
         init_file.write_text(script)
         init_file.chmod(0o755)
         logger.debug("Installed init script: %s", init_name)
+
+    # ── Install Script Generation (for missing binaries) ──────────────────
+
+    PACKAGE_MAP = {
+        "shairport-sync": "shairport-sync",
+        "upmpdcli": "upmpdcli",
+        "mpd": "mpd",
+        "mpc": "mpc",
+        "librespot": "librespot",
+        "squeezelite": "squeezelite",
+        "snapclient": "snapcast-client",
+    }
+
+    def _generate_install_script(
+        self,
+        component: dict,
+        rootfs_dir: Path,
+        missing: list[str],
+    ) -> None:
+        """Generate a shell script to install missing binaries on the target device."""
+        script_lines = [
+            "#!/bin/sh",
+            f"# Auto-generated installer for {component['description']}",
+            "# Run this on the LX06 device after flashing",
+            "",
+            "echo 'Installing media component dependencies...'",
+            "opkg update 2>/dev/null || true",
+        ]
+
+        for binary in missing:
+            pkg = self.PACKAGE_MAP.get(binary, binary)
+            script_lines.append(f"opkg install {pkg} 2>/dev/null || echo 'Please install {pkg} manually'")
+
+        script_lines.append("")
+        script_lines.append("echo 'Done. Reboot to start the service.'")
+
+        script_content = "\n".join(script_lines) + "\n"
+        script_path = rootfs_dir / "root" / f"install_{component['init_name']}.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(script_content)
+        script_path.chmod(0o755)
+        logger.info("Generated install script: %s", script_path.name)
+
+    def _generate_master_install_script(self, rootfs_dir: Path, components: list[dict]) -> None:
+        """Generate a master install script that runs all component installers."""
+        lines = ["#!/bin/sh", "# LX06 Media Suite Master Installer", "# Run: sh /root/install_media.sh", ""]
+        for comp in components:
+            lines.append(f"sh /root/install_{comp['init_name']}.sh")
+        lines.extend(["", "echo 'All media components installed! Reboot to start.'"])
+
+        master_path = rootfs_dir / "root" / "install_media.sh"
+        master_path.parent.mkdir(parents=True, exist_ok=True)
+        master_path.write_text("\n".join(lines) + "\n")
+        master_path.chmod(0o755)
+        logger.info("Generated master install script: install_media.sh")
 
     # ── Audio Permissions ────────────────────────────────────────────────────
 
