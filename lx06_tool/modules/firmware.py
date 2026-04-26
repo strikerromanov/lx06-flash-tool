@@ -33,7 +33,11 @@ from lx06_tool.modules.debloat import DebloatEngine
 
 if TYPE_CHECKING:
     from lx06_tool.utils.amlogic import AmlogicTool
-from lx06_tool.modules.docker_builder import DockerBuilder
+# DockerBuilder is optional - only needed for containerized builds
+try:
+    from lx06_tool.modules.docker_builder import DockerBuilder
+except ImportError:
+    DockerBuilder = None  # type: ignore[misc,assignment]
 from lx06_tool.modules.media_suite import MediaSuiteInstaller
 from lx06_tool.utils.compat import AsyncRunner
 from lx06_tool.utils.squashfs import SquashFSTool
@@ -112,7 +116,8 @@ class FirmwareOrchestrator:
         self._paths = paths
         self._choices = choices
         self._runner = runner or AsyncRunner(default_timeout=300.0, sudo=True)
-        self._docker_builder = docker_builder or DockerBuilder(runner=self._runner)
+        # Docker builder is optional - not required for host builds
+        self._docker_builder = docker_builder
         self._squashfs = SquashFSTool(runner=self._runner)
 
     # ── Pipeline Execution ───────────────────────────────────────────────────
@@ -164,6 +169,18 @@ class FirmwareOrchestrator:
             on_output("stdout", f"Extracting {self._paths.system_dump.name}...")
 
         try:
+            # Verify squashfs-tools are installed on host
+            check_result = await self._runner.run(
+                ["which", "unsquashfs"],
+                timeout=10,
+                sudo=False,
+            )
+            if not check_result.ok:
+                raise FirmwareError(
+                    "unsquashfs not found. Install squashfs-tools:",
+                    details="sudo pacman -S squashfs-tools",
+                )
+
             # Clean up any leftover state from previous failed extractions
             # Use sudo to remove root-owned directories from previous extractions
             if self._paths.extract_dir.exists():
@@ -288,11 +305,23 @@ class FirmwareOrchestrator:
         # Step 6: Repack squashfs
         step("repack", "Repacking squashfs...")
         try:
+            # Verify mksquashfs is available on host
+            check_result = await self._runner.run(
+                ["which", "mksquashfs"],
+                timeout=10,
+                sudo=False,
+            )
+            if not check_result.ok:
+                raise FirmwareError(
+                    "mksquashfs not found. Install squashfs-tools:",
+                    details="sudo pacman -S squashfs-tools",
+                )
+
             self._paths.output_dir.mkdir(parents=True, exist_ok=True)
-            await self._docker_builder.repack_squashfs(
+            await self._squashfs.repack(
                 rootfs_dir=self._paths.rootfs_dir,
-                output_squashfs=self._paths.output_system,
-                on_output=on_output,
+                output_path=self._paths.output_system,
+                on_output=lambda s, l: on_output("stdout", l) if on_output else None,
             )
             result.output_system = self._paths.output_system
             result.steps_completed.append("repack")
