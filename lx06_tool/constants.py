@@ -65,6 +65,11 @@ LX06_PARTITION_SIZES: Final[dict[str, int]] = {
 }
 LX06_MAX_SYSTEM_SIZE: Final[int] = 0x2800000  # 41,943,040 bytes (~40 MB)
 
+# Size fallback list for system partitions — some devices have bad blocks
+# or different NAND layouts that cause the official size (0x2820000) to fail.
+# Try the official size first, then fall back to smaller sizes.
+LX06_SYSTEM_SIZES_TO_TRY: Final[list[int]] = [0x2820000, 0x2800000]
+
 # Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
 # Large squashfs partitions (~26.5 MB) and data partition (20 MB) can take
 # 10-15 minutes each over USB bulk due to protocol overhead.
@@ -98,11 +103,11 @@ AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
 # Partitions that are read-only references (bootloader / tpl) — never flash these
 READ_ONLY_PARTITIONS: Final[frozenset[str]] = frozenset({"bootloader", "tpl"})
 
-# Partitions to skip during backup — inactive A/B slot (empty/garbage) or not needed
-# system1 is the inactive slot and contains no valid filesystem
-# boot1 is the inactive boot slot — not needed for rebuild
-# data partition is not needed for firmware customization
-SKIP_BACKUP_PARTITIONS: Final[frozenset[str]] = frozenset({"system1", "boot1", "data"})
+# Partitions to skip during backup — inactive A/B slot or not needed.
+# NOTE: The active system partition varies by device (system0 OR system1).
+# The build phase now detects the active partition by checking squashfs magic bytes.
+# This set is unused (backup dumps all partitions) but kept for reference.
+SKIP_BACKUP_PARTITIONS: Final[frozenset[str]] = frozenset({"boot1", "data"})
 
 # ─── aml-flash-tool / update.exe ─────────────────────────────────────────────
 

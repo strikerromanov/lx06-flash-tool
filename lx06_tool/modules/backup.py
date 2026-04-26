@@ -25,12 +25,12 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from lx06_tool.config import BackupSet, PartitionBackup
 from lx06_tool.constants import (
     DEFAULT_PARTITION_TIMEOUT,
     MIN_PARTITION_DUMP_RATIO,
     PARTITION_MAP,
     PARTITION_TIMEOUTS,
+    SQUASHFS_MAGIC_LE,
 )
 from lx06_tool.exceptions import (
     BackupIncompleteError,
@@ -97,6 +97,26 @@ async def dump_partition(
             f"Dump is suspiciously small: {actual_size} bytes "
             f"(expected >= {int(expected_size * MIN_PARTITION_DUMP_RATIO)})",
         )
+
+    # Validate squashfs magic bytes for system partitions
+    if label in ("system0", "system1"):
+        try:
+            with open(output_path, 'rb') as f:
+                magic = f.read(4)
+            if magic == SQUASHFS_MAGIC_LE:
+                logger.info(
+                    "[BACKUP] '%s': valid squashfs (little-endian 'hsqs') — %s is ACTIVE",
+                    label, label,
+                )
+            else:
+                logger.warning(
+                    "[BACKUP] '%s': NO valid squashfs magic (got %s) — "
+                    "partition may be inactive/empty on this device",
+                    label, magic.hex() if magic else "<empty>",
+                )
+        except Exception as exc:
+            logger.warning("[BACKUP] '%s': could not validate squashfs magic: %s", label, exc)
+
 
     return PartitionBackup(
         name=mtd_name,

@@ -39,6 +39,7 @@ from pathlib import Path
 
 from lx06_tool.constants import (
     DEFAULT_PARTITION_TIMEOUT,
+    LX06_SYSTEM_SIZES_TO_TRY,
     PARTITION_TIMEOUTS,
     SQUASHFS_MAGIC_BE,
     SQUASHFS_MAGIC_LE,
@@ -479,6 +480,30 @@ class AmlogicTool:
             # Clean up failed dump before retry
             if output_path.exists():
                 output_path.unlink(missing_ok=True)
+            # ── Attempt 1a: Retry with smaller size for system partitions ──
+            # Some devices have bad blocks or different NAND layouts that cause
+            # the official size (0x2820000) to fail at ~76%. Try smaller sizes.
+            if partition_label in ("system0", "system1") and size in LX06_SYSTEM_SIZES_TO_TRY:
+                for alt_size in LX06_SYSTEM_SIZES_TO_TRY:
+                    if alt_size == size:
+                        continue  # Already tried this size
+                    cmd = [str(self._exe), "mread", "store", partition_label,
+                           "normal", hex(alt_size), str(output_path)]
+                    log.info("[DUMP] Attempt 1a (fallback size 0x%X for %s): %s",
+                             alt_size, partition_label, cmd)
+                    result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+
+                    if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+                        log.info("[DUMP] Attempt 1a SUCCEEDED with size 0x%X: %d bytes",
+                                 alt_size, output_path.stat().st_size)
+                        await self._post_validate(output_path, partition_label)
+                        return output_path
+
+                    log.warning("[DUMP] Attempt 1a (size=0x%X) failed (RC=%s)",
+                                alt_size, result.returncode if result else "?")
+                    if output_path.exists():
+                        output_path.unlink(missing_ok=True)
+
 
         # ── Attempt 2: mread store <label> normal <file> (no size) ───────
         cmd = [str(self._exe), "mread", "store", partition_label, "normal", str(output_path)]

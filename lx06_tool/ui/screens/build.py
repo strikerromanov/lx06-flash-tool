@@ -97,6 +97,16 @@ class BuildScreen(Screen):
         elif event.button.id == "continue-btn":
             self.app.run_worker(self._go_next())
 
+    @staticmethod
+    def _has_squashfs_magic(path: Path) -> bool:
+        """Check if file starts with squashfs magic bytes (hsqs = 68 73 71 73)."""
+        try:
+            with open(path, 'rb') as f:
+                magic = f.read(4)
+                return magic == b'hsqs'
+        except Exception:
+            return False
+
     def _find_backup_image(
         self,
         backup_dir: Path,
@@ -114,6 +124,37 @@ class BuildScreen(Screen):
                 if candidate.exists():
                     return candidate
         return None
+
+    def _find_valid_system_backup(self, backup_dir: Path) -> tuple[Path | None, str]:
+        """Find the system backup with valid squashfs magic bytes.
+
+        Checks BOTH system0 and system1 dumps. Returns whichever has valid
+        squashfs magic bytes, since the active partition varies by device.
+        Some devices use system0 as active, others use system1.
+
+        Returns:
+            Tuple of (valid_image_path or None, slot_name or '')."""
+        # All candidate system images in preference order (try both mtd4 and mtd5)
+        candidates = [
+            ("mtd4", "_system0", "system0"),
+            ("mtd5", "_system1", "system1"),
+            ("mtd4", "",         "system0"),  # fallback: no suffix
+            ("mtd5", "",         "system1"),
+        ]
+        for prefix, suffix, slot in candidates:
+            path = backup_dir / f"{prefix}{suffix}.img"
+            if path.exists() and self._has_squashfs_magic(path):
+                logger.info("Found valid squashfs backup: %s (slot=%s)", path.name, slot)
+                return path, slot
+
+        # None had valid squashfs — return first existing one for error reporting
+        for prefix, suffix, slot in candidates:
+            path = backup_dir / f"{prefix}{suffix}.img"
+            if path.exists():
+                logger.warning("System backup %s exists but has NO valid squashfs magic", path.name)
+                return path, slot
+
+        return None, ""
 
     async def _extract_from_device(
         self,
@@ -204,30 +245,22 @@ class BuildScreen(Screen):
             boot_image: Path | None = None
             source_label = ""
 
-            # 1a. Check for existing backup images — ALWAYS prefer system0 (active slot)
-            # system0 = active partition with valid squashfs, system1 = inactive/empty
-            system_image = self._find_backup_image(
-                backup_dir,
-                prefixes=["mtd4"],      # mtd4 = system0 (ACTIVE) — try FIRST
-                suffixes=["_system0"],   # exact match for active slot
-            )
-            # Fallback: try any system image if exact active not found
-            if not system_image:
-                system_image = self._find_backup_image(
-                    backup_dir,
-                    prefixes=["mtd4", "mtd5"],
-                    suffixes=["_system0", "_system1", ""],
-                )
+            # 1a. Check for existing backup images — find the one with valid squashfs.
+            # The active partition varies by device (system0 on some, system1 on others),
+            # so we check both and use whichever has valid squashfs magic bytes.
+            system_image, active_slot = self._find_valid_system_backup(backup_dir)
 
             if system_image:
-                source_label = f"backup ({system_image.name})"
-                log.write(f"  [green]\u2713[/] Found system backup: {system_image.name}")
+                source_label = f"backup ({system_image.name}, slot={active_slot})"
+                log.write(f"  [green]\u2713[/] Found valid system backup: {system_image.name} (slot={active_slot})")
 
-                # Also look for boot backup
+                # Look for boot backup matching the active system slot
+                slot_boot_map = {"system0": "boot0", "system1": "boot1"}
+                preferred_boot_suffix = f"_{slot_boot_map.get(active_slot, 'boot0')}"
                 boot_image = self._find_backup_image(
                     backup_dir,
                     prefixes=["mtd2", "mtd3"],
-                    suffixes=["_boot0", "_boot1", ""],
+                    suffixes=[preferred_boot_suffix, "_boot0", "_boot1", ""],
                 )
                 if boot_image:
                     log.write(f"  [green]\u2713[/] Found boot backup: {boot_image.name}")
