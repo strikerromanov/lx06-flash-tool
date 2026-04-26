@@ -1000,6 +1000,72 @@ class AmlogicTool:
         return fallback_size
 
 
+    # ─── Memory Write (host→device RAM) ──────────────────────────────
+
+    async def mwrite(
+        self,
+        image_path: Path,
+        *,
+        mem_addr: str = "0x50000000",
+        mem_type: str = "mem",
+        timeout: int = 600,
+        on_progress: callable | None = None,
+        sudo_password: str = "",
+    ) -> RunResult:
+        """
+        Write a host file to device RAM via `update mwrite`.
+
+        Syntax: `update mwrite <file> mem <addr> normal`
+
+        This is used as a fallback for large partition images that overflow
+        the `update partition` command's size field.
+        """
+        log = logging.getLogger(__name__)
+        log.info("[MWRITE] Writing %s to device RAM at %s", image_path, mem_addr)
+
+        cmd = [self._exe, "mwrite", str(image_path), mem_type, mem_addr, "normal"]
+
+        try:
+            result = await run_streaming(
+                cmd,
+                timeout=timeout,
+                on_stdout=on_progress,
+                on_stderr=on_progress,
+            )
+            if result.returncode != 0:
+                raise UpdateExeError(
+                    f"mwrite of '{image_path}' to {mem_addr} failed: {result.stderr}",
+                    returncode=result.returncode,
+                )
+            return result
+        except Exception as exc:
+            if not sudo_password:
+                raise
+            log.debug("Retrying mwrite with sudo...")
+            try:
+                from lx06_tool.utils.sudo import sudo_run
+                sudo_result = await sudo_run(
+                    [str(c) for c in cmd],
+                    password=sudo_password,
+                    timeout=timeout,
+                )
+                if sudo_result.ok:
+                    return RunResult(
+                        cmd=[str(c) for c in cmd],
+                        returncode=0,
+                        stdout=sudo_result.output,
+                        stderr="",
+                    )
+                raise UpdateExeError(
+                    f"mwrite of '{image_path}' to {mem_addr} failed (sudo): {sudo_result.output}",
+                    returncode=sudo_result.returncode,
+                )
+            except UpdateExeError:
+                raise
+            except Exception as sudo_exc:
+                log.debug("sudo mwrite retry failed: %s", sudo_exc)
+                raise exc
+
     # ─── Partition Flash ───────────────────────────────────────────────
 
     async def partition(
@@ -1013,19 +1079,111 @@ class AmlogicTool:
         sudo_password: str = "",
     ) -> RunResult:
         """
-        Flash an image to a named partition.
+        Flash an image to a named partition with automatic fallback.
 
         Real syntax (from aml-flash-tool.sh)::
 
             update partition <name> <image> [type]
 
         The ``partition_type`` is typically "normal", "sparse", or "dtb".
+
+        Fallback chain for large images that overflow the protocol:
+        1. ``update partition <name> <file> normal``
+        2. ``update partition <name> <file> sparse``
+        3. Two-step mwrite: upload to RAM → bulkcmd write RAM→NAND
         """
         log = logging.getLogger(__name__)
-        log.info("Flashing partition '%s' from %s (type=%s)", partition_name, image_path, partition_type)
+        image_size = image_path.stat().st_size if image_path.exists() else 0
+        log.info(
+            "Flashing partition '%s' from %s (type=%s, size=%d/0x%X)",
+            partition_name, image_path, partition_type, image_size, image_size,
+        )
 
+        # --- Strategy 1: update partition <name> <file> <type> ---
         cmd = [self._exe, "partition", partition_name, str(image_path), partition_type]
+        try:
+            result = await self._run_flash_cmd(
+                cmd, partition_name, image_path, timeout=timeout,
+                on_progress=on_progress, sudo_password=sudo_password,
+            )
+            log.info("Flash of '%s' succeeded with type=%s", partition_name, partition_type)
+            return result
+        except (UpdateExeError, Exception) as exc:
+            err_msg = str(exc).lower()
+            is_overflow = any(
+                s in err_msg
+                for s in ("overflow", "too large", "eoverflow", "-75", "value too large")
+            )
+            if not is_overflow:
+                raise
+            log.warning(
+                "Flash of '%s' with type=%s failed (overflow): %s",
+                partition_name, partition_type, exc,
+            )
 
+        # --- Strategy 2: try sparse type ---
+        if partition_type != "sparse":
+            log.info("Retrying flash of '%s' with sparse type", partition_name)
+            cmd_sparse = [self._exe, "partition", partition_name, str(image_path), "sparse"]
+            try:
+                result = await self._run_flash_cmd(
+                    cmd_sparse, partition_name, image_path, timeout=timeout,
+                    on_progress=on_progress, sudo_password=sudo_password,
+                )
+                log.info("Flash of '%s' succeeded with sparse type", partition_name)
+                return result
+            except (UpdateExeError, Exception) as exc:
+                log.warning("Flash of '%s' with sparse type also failed: %s", partition_name, exc)
+        else:
+            log.info("Already tried sparse type, skipping")
+
+        # --- Strategy 3: two-step mwrite → bulkcmd store write.part ---
+        log.info(
+            "Attempting two-step flash for '%s': mwrite to RAM → bulkcmd store write.part",
+            partition_name,
+        )
+        mem_addr = "0x50000000"
+        size_hex = hex(image_size)
+
+        # Step 3a: upload file to device RAM
+        log.info("[MWRITE] Uploading %s to device RAM at %s", image_path, mem_addr)
+        await self.mwrite(
+            image_path,
+            mem_addr=mem_addr,
+            timeout=timeout,
+            on_progress=on_progress,
+            sudo_password=sudo_password,
+        )
+
+        # Step 3b: write from RAM to NAND partition
+        store_cmd = f"store write.part {partition_name} {mem_addr} 0 {size_hex}"
+        log.info("[BULKCMD] %s", store_cmd)
+        result = await self.bulkcmd(
+            store_cmd,
+            timeout=60,
+            sudo_password=sudo_password,
+        )
+        if not result.ok:
+            raise UpdateExeError(
+                f"store write.part for '{partition_name}' failed: {result.stderr}",
+                returncode=result.returncode,
+            )
+
+        log.info("Two-step flash of '%s' completed successfully", partition_name)
+        return result
+
+    async def _run_flash_cmd(
+        self,
+        cmd: list[str],
+        partition_name: str,
+        image_path: Path,
+        *,
+        timeout: int = 300,
+        on_progress: callable | None = None,
+        sudo_password: str = "",
+    ) -> RunResult:
+        """Execute a flash command with optional sudo fallback."""
+        log = logging.getLogger(__name__)
         try:
             result = await run_streaming(
                 cmd,
@@ -1042,8 +1200,6 @@ class AmlogicTool:
         except Exception as exc:
             if not sudo_password:
                 raise
-
-            # Retry with sudo as fallback for USB permission issues
             log.debug("Retrying partition flash with sudo...")
             try:
                 from lx06_tool.utils.sudo import sudo_run
@@ -1060,16 +1216,15 @@ class AmlogicTool:
                         stdout=sudo_result.output,
                         stderr="",
                     )
-                else:
-                    raise UpdateExeError(
-                        f"flash of '{partition_name}' from '{image_path}' failed (sudo): {sudo_result.output}",
-                        returncode=sudo_result.returncode,
-                    )
+                raise UpdateExeError(
+                    f"flash of '{partition_name}' from '{image_path}' failed (sudo): {sudo_result.output}",
+                    returncode=sudo_result.returncode,
+                )
             except UpdateExeError:
                 raise
             except Exception as sudo_exc:
                 log.debug("sudo partition flash retry failed: %s", sudo_exc)
-                raise exc  # Raise original exception
+                raise exc
 
     # ─── Legacy / Compatibility ────────────────────────────────────────
 

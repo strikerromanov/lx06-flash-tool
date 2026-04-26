@@ -20,6 +20,7 @@ from lx06_tool.config import LX06Device
 from lx06_tool.constants import (
     AB_BOOT_SLOTS,
     AB_SYSTEM_SLOTS,
+    FLASH_PARTITION_TIMEOUTS,
     MIN_SQUASHFS_SIZE_BYTES,
     READ_ONLY_PARTITIONS,
 )
@@ -128,11 +129,16 @@ async def flash_partition(
             partition=partition_label,
         )
 
-    # Flash
+    # Resolve timeout for this partition
+    from lx06_tool.constants import DEFAULT_FLASH_TIMEOUT
+    flash_timeout = FLASH_PARTITION_TIMEOUTS.get(partition_label, DEFAULT_FLASH_TIMEOUT)
+
+    # Flash with per-partition timeout
     try:
         await tool.partition(
             partition_name=partition_label,
             image_path=image_path,
+            timeout=flash_timeout,
             on_progress=on_progress,
             sudo_password=sudo_password,
         )

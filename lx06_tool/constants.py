@@ -68,6 +68,18 @@ PARTITION_TIMEOUTS: Final[dict[str, int]] = {
 }
 DEFAULT_PARTITION_TIMEOUT: Final[int] = 300  # 5 min fallback
 
+# Per-partition flash timeouts (seconds) — writes are slower than reads.
+FLASH_PARTITION_TIMEOUTS: Final[dict[str, int]] = {
+    "bootloader": 180,   # 3 min
+    "tpl":        240,   # 4 min
+    "boot0":      180,   # 3 min
+    "boot1":      180,   # 3 min
+    "system0":    600,   # 10 min — large squashfs writes are slow
+    "system1":    600,   # 10 min — large squashfs writes are slow
+    "data":       600,   # 10 min
+}
+DEFAULT_FLASH_TIMEOUT: Final[int] = 300  # 5 min fallback for flash
+
 # Which partitions form the A/B slot pairs
 AB_BOOT_SLOTS:   Final[tuple[str, str]] = ("boot0",   "boot1")
 AB_SYSTEM_SLOTS: Final[tuple[str, str]] = ("system0", "system1")
