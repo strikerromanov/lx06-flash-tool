@@ -51,7 +51,7 @@ PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
     "mtd3": {"label": "boot1",      "size": 0x600000},   #  6 MB
     "mtd4": {"label": "system0",    "size": 0x2820000},  # 40.2 MB — SquashFS rootfs A
     "mtd5": {"label": "system1",    "size": 0x2800000},  # 40 MB — SquashFS rootfs B
-    "mtd6": {"label": "data",       "size": 0x1400000},  # 20 MB
+    "mtd6": {"label": "data",       "size": 0x13e0000},  # 20 MB
 }
 
 # Flashable partition size limits (for pre-flash validation)
@@ -61,7 +61,7 @@ LX06_PARTITION_SIZES: Final[dict[str, int]] = {
     "boot1":      0x600000,     # 6,291,456 bytes
     "system0":    0x2820000,    # 42,188,800 bytes (~40 MB)
     "system1":    0x2800000,    # 41,943,040 bytes (~40 MB)
-    "data":       0x1400000,    # 20,971,520 bytes
+    "data":       0x13e0000,    # 20,805,632 bytes
 }
 LX06_MAX_SYSTEM_SIZE: Final[int] = 0x2800000  # 41,943,040 bytes (~40 MB)
 
