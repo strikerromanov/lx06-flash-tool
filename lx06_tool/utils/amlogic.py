@@ -397,8 +397,9 @@ class AmlogicTool:
           1. mread store <label> normal <file>     — standard syntax
           2. mread <label> <file>                  — simplified syntax
           3. mread store <label> normal <size> <file> — with explicit size
-          4. Chunked read via bulkcmd store read.part + mread mem
-             (only if direct reads fail, uses safe high address 0x50000000)
+
+        NOTE: Chunked RAM fallback has been REMOVED because it causes device
+        restarts on AXG SoCs due to heap corruption.
 
         Parameters
         ----------
@@ -483,28 +484,12 @@ class AmlogicTool:
             log.warning("[DUMP] Attempt 3 failed (RC=%s)",
                         result.returncode if result else "?")
 
-        # ── Attempt 4: Chunked fallback via RAM ─────────────────────────
-        # Uses a HIGH safe address (0x50000000) far above U-Boot heap
-        if size > 0:
-            log.warning("[DUMP] Direct reads failed, trying chunked fallback...")
-            try:
-                await self._chunked_dump(
-                    partition_label, size, output_path,
-                    timeout=timeout, on_progress=on_progress,
-                    sudo_password=sudo_password,
-                )
-                if output_path.exists() and output_path.stat().st_size > 0:
-                    log.info("[DUMP] Chunked fallback SUCCEEDED: %d bytes",
-                             output_path.stat().st_size)
-                    await self._post_validate(output_path, partition_label)
-                    return output_path
-            except Exception as exc:
-                log.error("[DUMP] Chunked fallback failed: %s", exc)
-
         # ── All methods failed ──────────────────────────────────────────
+        # NOTE: We do NOT use chunked RAM fallback (store read.part → mread mem)
+        # because it causes heap corruption on AXG SoCs and device restarts.
         raise UpdateExeError(
             f"Failed to dump partition '{partition_label}'. "
-            f"Tried direct NAND→host and chunked fallback. "
+            f"Tried all direct NAND→host transfer methods. "
             f"Last error: {(result.stderr or 'unknown')[:300] if result else 'no result'}",
             returncode=result.returncode if result else -1,
         )

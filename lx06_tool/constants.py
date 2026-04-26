@@ -53,16 +53,16 @@ PARTITION_MAP: Final[dict[str, dict[str, object]]] = {
 }
 
 # Per-partition dump timeouts (seconds) — USB 2.0 transfer is slow.
-# Large squashfs partitions (~26.5 MB) and data partition (20 MB) take
-# 3-5 minutes each over USB bulk.
+# Large squashfs partitions (~26.5 MB) and data partition (20 MB) can take
+# 10-15 minutes each over USB bulk due to protocol overhead.
 PARTITION_TIMEOUTS: Final[dict[str, int]] = {
-    "bootloader": 120,   # 2 min — small (2 MB)
-    "tpl":        180,   # 3 min — medium (8 MB)
-    "boot0":      120,   # 2 min — medium (6 MB)
-    "boot1":      120,   # 2 min — medium (6 MB)
-    "system0":    540,   # 9 min — large squashfs (26.5 MB)
-    "system1":    540,   # 9 min — large squashfs (26.5 MB)
-    "data":       600,   # 10 min — data partition (20 MB, may be slow)
+    "bootloader": 180,   # 3 min — small (2 MB)
+    "tpl":        240,   # 4 min — medium (8 MB)
+    "boot0":      180,   # 3 min — medium (6 MB)
+    "boot1":      180,   # 3 min — medium (6 MB)
+    "system0":    900,   # 15 min — large squashfs (26.5 MB)
+    "system1":    900,   # 15 min — large squashfs (26.5 MB)
+    "data":       900,   # 15 min — data partition (20 MB, may be slow)
 }
 DEFAULT_PARTITION_TIMEOUT: Final[int] = 300  # 5 min fallback
 
