@@ -92,9 +92,10 @@ class CustomizeScreen(Screen):
                         id="ai-hard", value=False,
                     )
                     yield Static("\nLLM Configuration:", classes="section-title")
-                    yield Input(placeholder="LLM Provider (openai/gemini/kimi)", id="llm-provider", value="openai")
+                    yield Input(placeholder="LLM Provider (openai/gemini/kimi/z.ai)", id="llm-provider", value="openai")
                     yield Input(placeholder="API Key", id="llm-api-key", password=True)
-                    yield Input(placeholder="Model name (optional)", id="llm-model")
+                    yield Input(placeholder="API Base (optional - for z.ai/custom)", id="llm-api-base")
+                    yield Input(placeholder="Model (e.g., gpt-4o-mini, gemini-pro, glm-4-flash)", id="llm-model")
                     yield Input(placeholder="Custom Wake Word (hard patch only)", id="wake-word", value="hey_assistant")
                     yield Input(placeholder="AI Server URL (hard patch only)", id="ai-server-url")
 
@@ -171,6 +172,7 @@ class CustomizeScreen(Screen):
             ai_mode=ai_mode,
             llm_provider=self._get_input("llm-provider") or "openai",
             llm_api_key=self._get_input("llm-api-key"),
+            llm_api_base=self._get_input("llm-api-base"),
             llm_model=self._get_input("llm-model"),
             custom_wake_word=self._get_input("wake-word"),
             ai_server_url=self._get_input("ai-server-url"),
