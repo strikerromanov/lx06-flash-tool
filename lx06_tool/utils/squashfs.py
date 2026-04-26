@@ -112,18 +112,30 @@ class SquashFSTool:
             sudo=False,  # Try without sudo to preserve user ownership
         )
 
-        # If extraction failed without sudo, retry with sudo
-        # (Some images might need sudo for device nodes)
+        # If extraction failed without sudo, check if it actually succeeded
+        # unsquashfs can return non-zero exit code even on successful extraction
         if not result.success:
-            logger.info("Extraction without sudo failed, retrying with sudo...")
-            result = await self._runner.run(
-                ["unsquashfs", "-d", str(output_dir), str(image_path)],
-                timeout=120,
-                on_output=on_output,
-                sudo=True,  # Retry with sudo for device nodes
-            )
+            if output_dir.exists() and any(output_dir.iterdir()):
+                logger.info(
+                    "Extraction succeeded despite non-zero exit code (dir has %d items)",
+                    sum(1 for _ in output_dir.rglob("*")),
+                )
+            else:
+                # Genuinely failed — clean up and retry with sudo
+                logger.info("Extraction without sudo failed, retrying with sudo...")
+                import shutil
+                shutil.rmtree(output_dir, ignore_errors=True)
+                result = await self._runner.run(
+                    ["unsquashfs", "-d", str(output_dir), str(image_path)],
+                    timeout=120,
+                    on_output=on_output,
+                    sudo=True,
+                )
 
-        if not result.success:
+                if not result.success and output_dir.exists() and any(output_dir.iterdir()):
+                    logger.info("Extraction with sudo also succeeded despite exit code")
+
+        if not output_dir.exists() or not any(output_dir.iterdir()):
             raise SquashFSExtractError(
                 f"Failed to extract {image_path}: {result.stderr}",
                 details="Ensure squashfs-tools is installed and the image is valid.",
