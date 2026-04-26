@@ -434,31 +434,55 @@ class AmlogicTool:
                 partition_label, DEFAULT_PARTITION_TIMEOUT,
             )
 
+        # Resolve size: use provided size, or fall back to known LX06 partition sizes
+        LX06_KNOWN_SIZES = {
+            "bootloader": 0x200000,   # 2,097,152
+            "tpl":        0x800000,   # 8,388,608
+            "boot0":      0x600000,   # 6,291,456
+            "boot1":      0x600000,   # 6,291,456
+            "system0":    0x2820000,  # 42,188,800
+            "system1":    0x2800000,  # 41,943,040
+            "data":       0x13e0000,  # 20,805,632
+        }
+        if size <= 0:
+            size = LX06_KNOWN_SIZES.get(partition_label, 0)
+            if size > 0:
+                log.info("[DUMP] Using known LX06 size for '%s': 0x%X (%d bytes)",
+                         partition_label, size, size)
+
         log.info(
-            "[DUMP] Starting direct NAND→host dump of '%s' -> %s (timeout=%ds)",
-            partition_label, output_path, timeout,
+            "[DUMP] Starting dump of '%s' -> %s (size=0x%X, timeout=%ds)",
+            partition_label, output_path, size, timeout,
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # ── Attempt 1: Standard mread store syntax ──────────────────────
+        # ── Attempt 1: mread store <label> normal <size> <file> ──────────
+        # Official syntax from xiaoai-patch: mread store system0 normal 0x2820000 mtd4.img
+        # The SIZE parameter is MANDATORY for correct NAND→host transfer.
+        if size > 0:
+            cmd = [str(self._exe), "mread", "store", partition_label,
+                   "normal", hex(size), str(output_path)]
+            log.info("[DUMP] Attempt 1 (official syntax with size): %s", cmd)
+            result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+
+            if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+                log.info("[DUMP] Attempt 1 SUCCEEDED: %d bytes", output_path.stat().st_size)
+                await self._post_validate(output_path, partition_label)
+                return output_path
+
+            log.warning("[DUMP] Attempt 1 failed (RC=%s, exists=%s): %s",
+                        result.returncode if result else "?",
+                        output_path.exists(),
+                        (result.stderr or "")[:200] if result else "no result")
+
+            # Clean up failed dump before retry
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
+
+        # ── Attempt 2: mread store <label> normal <file> (no size) ───────
         cmd = [str(self._exe), "mread", "store", partition_label, "normal", str(output_path)]
-        log.info("[DUMP] Attempt 1: %s", cmd)
-        result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
-
-        if result.ok and output_path.exists() and output_path.stat().st_size > 0:
-            log.info("[DUMP] Attempt 1 SUCCEEDED: %d bytes", output_path.stat().st_size)
-            await self._post_validate(output_path, partition_label)
-            return output_path
-
-        log.warning("[DUMP] Attempt 1 failed (RC=%s, exists=%s): %s",
-                    result.returncode if result else "?",
-                    output_path.exists(),
-                    (result.stderr or "")[:200] if result else "no result")
-
-        # ── Attempt 2: Simplified mread syntax ──────────────────────────
-        cmd = [str(self._exe), "mread", partition_label, str(output_path)]
-        log.info("[DUMP] Attempt 2: %s", cmd)
+        log.info("[DUMP] Attempt 2 (no size): %s", cmd)
         result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
 
         if result.ok and output_path.exists() and output_path.stat().st_size > 0:
@@ -469,24 +493,24 @@ class AmlogicTool:
         log.warning("[DUMP] Attempt 2 failed (RC=%s)",
                     result.returncode if result else "?")
 
-        # ── Attempt 3: mread with explicit size ─────────────────────────
-        if size > 0:
-            cmd = [str(self._exe), "mread", "store", partition_label,
-                   "normal", str(size), str(output_path)]
-            log.info("[DUMP] Attempt 3 (with size %d): %s", size, cmd)
-            result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
+        # Clean up before next attempt
+        if output_path.exists():
+            output_path.unlink(missing_ok=True)
 
-            if result.ok and output_path.exists() and output_path.stat().st_size > 0:
-                log.info("[DUMP] Attempt 3 SUCCEEDED: %d bytes", output_path.stat().st_size)
-                await self._post_validate(output_path, partition_label)
-                return output_path
+        # ── Attempt 3: Simplified mread <label> <file> ──────────────────
+        cmd = [str(self._exe), "mread", partition_label, str(output_path)]
+        log.info("[DUMP] Attempt 3 (simplified): %s", cmd)
+        result = await self._run_dump(cmd, timeout, on_progress, sudo_password)
 
-            log.warning("[DUMP] Attempt 3 failed (RC=%s)",
-                        result.returncode if result else "?")
+        if result.ok and output_path.exists() and output_path.stat().st_size > 0:
+            log.info("[DUMP] Attempt 3 SUCCEEDED: %d bytes", output_path.stat().st_size)
+            await self._post_validate(output_path, partition_label)
+            return output_path
+
+        log.warning("[DUMP] Attempt 3 failed (RC=%s)",
+                    result.returncode if result else "?")
 
         # ── All methods failed ──────────────────────────────────────────
-        # NOTE: We do NOT use chunked RAM fallback (store read.part → mread mem)
-        # because it causes heap corruption on AXG SoCs and device restarts.
         raise UpdateExeError(
             f"Failed to dump partition '{partition_label}'. "
             f"Tried all direct NAND→host transfer methods. "
