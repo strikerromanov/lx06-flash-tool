@@ -24,6 +24,7 @@ from lx06_tool.constants import (
     MIN_PARTITION_DUMP_RATIO,
     PARTITION_MAP,
     PARTITION_TIMEOUTS,
+    READ_ONLY_PARTITIONS,
 )
 from lx06_tool.exceptions import (
     BackupIncompleteError,
@@ -138,7 +139,18 @@ async def dump_all_partitions(
 
     for idx, (mtd_name, meta) in enumerate(PARTITION_MAP.items()):
         label  = str(meta["label"])
-        output = backup_dir / f"{mtd_name}_{label}.img"
+
+        # Skip read-only partitions (bootloader, tpl) - they cause device restarts
+        if label in READ_ONLY_PARTITIONS:
+            logger.info(
+                "[BACKUP] Skipping read-only partition '%s' (%s) - not needed for firmware rebuild",
+                mtd_name, label
+            )
+            if on_partition_skip:
+                on_partition_skip(mtd_name, f"Read-only partition - {label} not needed for backup")
+            continue
+
+        output = backup_dir / "{}_{}.img".format(mtd_name, label)
 
         if on_partition_start:
             on_partition_start(mtd_name, label)

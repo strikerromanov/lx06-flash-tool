@@ -28,8 +28,10 @@ BACKUP_INFO = """## Phase 2: Backup & Safety
 This phase will:
 
 1. **Unlock the bootloader** — Set bootdelay=15 for recovery access
-2. **Dump all 7 MTD partitions** — bootloader, tpl, boot0/1, system0/1, data
+2. **Dump modifiable partitions** — boot0/1, system0/1, data (5 partitions)
 3. **Verify backup integrity** — SHA256 + MD5 checksums
+
+**Note:** Bootloader and tpl partitions are skipped (read-only, cause device restarts).
 
 Your backup is your safety net. If anything goes wrong, you can always
 restore from these dumps.
