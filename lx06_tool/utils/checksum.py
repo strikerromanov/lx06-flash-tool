@@ -86,6 +86,7 @@ async def verify_file(
 
 def write_checksum_file(checksums: FileChecksums, dest: Path) -> None:
     """Write a <sha256>  <filename> style checksum file alongside the dump."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(
         f"SHA256: {checksums.sha256}  {checksums.path.name}\n"
         f"MD5:    {checksums.md5}  {checksums.path.name}\n",
