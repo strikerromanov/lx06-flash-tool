@@ -22,15 +22,23 @@ class CopyLogMixin:
         """Copy the contents of the first RichLog widget to the system clipboard."""
         try:
             log = self.query_one(RichLog)
-            # Extract plain text from RichLog lines
-            lines = []
-            for child in log._lines:  # RichLog stores rendered lines
-                try:
-                    lines.append(child.plain if hasattr(child, 'plain') else str(child))
-                except Exception:
-                    lines.append(str(child))
 
-            text = "\n".join(lines) if lines else "(empty log)"
+            # Use the debug sink's stored content if available
+            if hasattr(self, '_debug_sink') and self._debug_sink:
+                text = self._debug_sink.get_all_text()
+            else:
+                # Fallback: try to get content from RichLog (may not work in all Textual versions)
+                text = "(empty log)"
+                try:
+                    # Try to access lines through public API if available
+                    if hasattr(log, 'content'):
+                        text = str(log.content)
+                    elif hasattr(log, 'text'):
+                        text = log.text
+                    else:
+                        text = "Unable to extract log content - use Download Log button instead"
+                except Exception:
+                    text = "Unable to extract log content - use Download Log button instead"
 
             # Try to copy to clipboard using available tools
             try:

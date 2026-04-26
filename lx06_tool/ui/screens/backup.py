@@ -162,15 +162,8 @@ class BackupScreen(Screen):
         try:
             log = self.query_one(RichLog)
 
-            # Extract plain text from RichLog lines
-            lines = []
-            for child in log._lines:  # RichLog stores rendered lines
-                try:
-                    lines.append(child.plain if hasattr(child, 'plain') else str(child))
-                except Exception:
-                    lines.append(str(child))
-
-            text = "\n".join(lines) if lines else "(empty log)"
+            # Use the debug sink's stored content (RichLogSink.get_all_text())
+            text = self._debug_sink.get_all_text()
 
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
