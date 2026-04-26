@@ -204,12 +204,20 @@ class BuildScreen(Screen):
             boot_image: Path | None = None
             source_label = ""
 
-            # 1a. Check for existing backup images (correct naming: mtd4_system0.img)
+            # 1a. Check for existing backup images — ALWAYS prefer system0 (active slot)
+            # system0 = active partition with valid squashfs, system1 = inactive/empty
             system_image = self._find_backup_image(
                 backup_dir,
-                prefixes=["mtd4", "mtd5"],
-                suffixes=["_system0", "_system1", ""],
+                prefixes=["mtd4"],      # mtd4 = system0 (ACTIVE) — try FIRST
+                suffixes=["_system0"],   # exact match for active slot
             )
+            # Fallback: try any system image if exact active not found
+            if not system_image:
+                system_image = self._find_backup_image(
+                    backup_dir,
+                    prefixes=["mtd4", "mtd5"],
+                    suffixes=["_system0", "_system1", ""],
+                )
 
             if system_image:
                 source_label = f"backup ({system_image.name})"
