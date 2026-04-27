@@ -1,14 +1,100 @@
 # LX06 Flash Tool
 
-All-in-one TUI tool to flash custom firmware (xiaoai-patch) onto the Xiaomi LX06 smart speaker.
+All-in-one TUI tool to flash custom firmware onto the **Xiaomi LX06** (Xiaoai Speaker Pro) smart speaker, transforming it into an open multi-protocol audio player with WiFi, SSH, ADB, and full media services.
 
 ## What It Does
 
-1. **Environment Setup** — Detects your Linux distro, installs required packages, downloads aml-flash-tool, configures udev rules
-2. **USB Connection** — Guides you through entering USB burning mode, detects the device
-3. **Backup** — Dumps all 7 NAND partitions for safety
-4. **Download** — Fetches the latest pre-built firmware from [xiaoai-patch releases](https://github.com/duhow/xiaoai-patch/releases)
-5. **Flash** — Writes boot + system images to both A/B slots
+1. **Environment Setup** — Detects your Linux distro, installs required packages, downloads aml-flash-tool, configures udev rules for Amlogic USB
+2. **USB Connection** — Guides you through entering USB burning mode, detects the Amlogic device
+3. **Backup** — Dumps all 7 NAND partitions for full safety backup
+4. **Download** — Fetches the latest pre-built firmware from [GitHub releases](https://github.com/strikerromanov/lx06-flash-tool/releases)
+5. **Flash** — Writes boot + system images to both A/B slots for redundancy
+
+## Features (Post-Flash)
+
+The custom firmware (based on [xiaoai-patch](https://github.com/duhow/xiaoai-patch)) provides:
+
+- **WiFi** — Pre-configured wireless networking with DHCP hostname support
+- **SSH Access** — Root shell via `ssh root@<speaker-ip>` (password: `factory`)
+- **ADB Access** — Android Debug Bridge enabled via `/data/adb_enable`
+- **Spotify Connect** — [librespot](https://github.com/librespot-org/librespot) with ALSA backend, 320kbps, softvol mixer
+- **AirPlay** — [shairport-sync](https://github.com/mikebrady/shairport-sync) for Apple device streaming
+- **UPnP/DLNA** — [upmpdcli](https://github.com/medoc92/upmpdcli) with MPD backend
+- **Squeezelite** — Logitech Media Server client
+- **Snapcast Client** — Synchronized multi-room audio via [Snapcast](https://github.com/badaix/snapcast)
+- **MPD** — Music Player Daemon for local playback control
+- **Avahi/mDNS** — Bonjour/Zeroconf service discovery for all protocols
+- **Bluetooth** — Enhanced Bluetooth audio with additional codec support
+- **Persistent Data** — All configs and data survive firmware updates on `/data` (UBIFS)
+
+## Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/strikerromanov/lx06-flash-tool.git
+cd lx06-flash-tool
+
+# Set up virtual environment
+python -m venv venv
+source venv/bin/activate
+pip install -e .
+
+# Run the TUI flasher
+lx06-tool
+```
+
+Follow the interactive TUI screens to flash your speaker.
+
+### Prerequisites
+
+- **Linux** (amd64) — Ubuntu, Debian, Fedora, Arch, or derivatives
+- **Python 3.10+**
+- **USB 2.0/3.0 port** + micro USB cable (data cable, not charge-only)
+- **sudo** access (for udev rules and flashing)
+- **git**
+
+## Post-Flash Setup
+
+### SSH Access
+```bash
+ssh root@192.168.x.x  # password: factory
+```
+
+### Spotify Connect
+
+librespot starts automatically on boot. To configure:
+```bash
+# Edit the init script
+vi /etc/rc.d/S98librespot
+
+# Restart the service
+killall librespot
+/etc/rc.d/S98librespot start
+```
+
+The speaker appears as "LX06-3555" in Spotify Connect. Change the name in the init script's `--name` parameter.
+
+### AirPlay
+
+Shairport-sync starts automatically. The speaker appears as "LX06" in AirPlay device list.
+
+### UPnP/DLNA
+
+upmpdcli starts automatically. The speaker appears as a UPnP renderer on your network.
+
+### Snapcast
+
+To connect to a Snapcast server:
+```bash
+# Edit the snapclient init script
+vi /etc/rc.d/S95snapclient
+# Add your Snapcast server IP
+```
+
+### Check Running Services
+```bash
+ps | grep -v '\[' | sort
+```
 
 ## Supported Distros
 
@@ -17,39 +103,6 @@ All-in-one TUI tool to flash custom firmware (xiaoai-patch) onto the Xiaomi LX06
 | Debian | Ubuntu, Debian, Linux Mint, Pop!_OS, Kali | apt |
 | Fedora | Fedora, RHEL, Rocky, Alma | dnf |
 | Arch | CachyOS, Arch Linux, Manjaro, EndeavourOS | pacman |
-
-## Prerequisites
-
-- **Linux** (amd64)
-- **Python 3.10+**
-- **USB port** + micro USB cable
-- **sudo** access
-- **git**
-
-## Installation
-
-```bash
-git clone https://github.com/your-repo/lx06-flash-tool.git
-cd lx06-flash-tool
-python -m venv venv
-source venv/bin/activate
-pip install -e .
-lx06-tool
-```
-
-## Usage
-
-```bash
-lx06-tool
-```
-
-The TUI guides you through 5 screens:
-
-1. **Welcome** — Prerequisite checks
-2. **Environment Setup** — Install packages, download tools
-3. **USB Connection** — Connect speaker, enter burning mode
-4. **Backup & Flash** — Backup partitions, download firmware, flash
-5. **Complete** — Success summary
 
 ## Partition Table (LX06)
 
@@ -61,35 +114,7 @@ The TUI guides you through 5 screens:
 | mtd3 | boot1 | 6 MB | Kernel B |
 | mtd4 | system0 | 40.2 MB | Rootfs A (squashfs) |
 | mtd5 | system1 | 40 MB | Rootfs B (squashfs) |
-| mtd6 | data | 20.8 MB | Persistent data |
-
-## Flash Commands (Reference)
-
-```bash
-# Identify device
-update identify
-
-# Set boot delay (safety recovery)
-update bulkcmd "setenv bootdelay 15"
-update bulkcmd "saveenv"
-
-# Backup all partitions
-update mread store bootloader normal 0x200000 mtd0.img
-update mread store tpl normal 0x800000 mtd1.img
-update mread store boot0 normal 0x600000 mtd2.img
-update mread store boot1 normal 0x600000 mtd3.img
-update mread store system0 normal 0x2820000 mtd4.img
-update mread store system1 normal 0x2800000 mtd5.img
-update mread store data normal 0x13e0000 mtd6.img
-
-# Flash boot (both A/B slots)
-update partition boot0 boot.img
-update partition boot1 boot.img
-
-# Flash system (both A/B slots)
-update partition system0 root.squashfs
-update partition system1 root.squashfs
-```
+| mtd6 | data | 20.8 MB | Persistent data (UBIFS) |
 
 ## Project Structure
 
@@ -125,14 +150,16 @@ lx06-flash-tool/
 ## Recovery
 
 If flashing fails, the device can be recovered via:
-1. **Serial TTL** (115200 baud) — Interrupt U-Boot within 15 seconds (bootdelay)
-2. **Backup restore** — Flash backed-up partition images
-3. **A/B failover** — U-Boot automatically tries the other slot
+1. **Serial TTL** (115200 baud) — Interrupt U-Boot within 15 seconds (bootdelay is set to 15s)
+2. **Backup restore** — Re-flash your backed-up partition images using the same tool
+3. **A/B failover** — U-Boot automatically tries the other slot if one fails
 
 ## References
 
-- [xiaoai-patch](https://github.com/duhow/xiaoai-patch) — Custom firmware project
-- [aml-flash-tool](https://github.com/radxa/aml-flash-tool) — Amlogic flash utility
+- [xiaoai-patch](https://github.com/duhow/xiaoai-patch) — Custom firmware project for Xiaomi speakers
+- [aml-flash-tool](https://github.com/radxa/aml-flash-tool) — Amlogic USB flash utility
+- [librespot](https://github.com/librespot-org/librespot) — Open Source Spotify client
+- [shairport-sync](https://github.com/mikebrady/shairport-sync) — AirPlay audio player
 
 ## License
 
